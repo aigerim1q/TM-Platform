@@ -49,20 +49,20 @@ export default function RegisterPage() {
     e.preventDefault();
     setError(null);
 
+    if (password !== password2) {
+      setError("Пароли не совпадают");
+      return;
+    }
+
     try {
       setLoading(true);
 
-      // ВАЖНО: бэк требует org_id и role
       await registerUser({
         email: email.trim(),
         password,
-        org_id: 1,
-        role: "employee",
-        name: `${firstName.trim()} ${lastName.trim()}`.trim(),
-        remember: true,
       });
 
-      router.push("/dashboard");
+      router.push("/login");
     } catch (err: any) {
       setError(err?.message || "Ошибка регистрации");
     } finally {

@@ -14,10 +14,10 @@ func NewService(secret string) *Service {
 	return &Service{secret: []byte(secret)}
 }
 
-func (s *Service) CreateToken(userID string) (string, error) {
+func (s *Service) CreateToken(userID string, ttl time.Duration) (string, error) {
 	claims := jwt.MapClaims{
 		"sub": userID,
-		"exp": time.Now().Add(24 * time.Hour).Unix(),
+		"exp": time.Now().Add(ttl).Unix(),
 		"iat": time.Now().Unix(),
 	}
 

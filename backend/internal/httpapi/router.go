@@ -13,6 +13,7 @@ import (
 func NewRouter(authHandler *auth.Handler, projectsHandler *projects.Handler, authSvc *auth.Service) http.Handler {
 	r := chi.NewRouter()
 
+	r.Use(CORSMiddleware("http://localhost:3000"))
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
@@ -26,12 +27,17 @@ func NewRouter(authHandler *auth.Handler, projectsHandler *projects.Handler, aut
 	r.Route("/auth", func(r chi.Router) {
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
+		r.Post("/refresh", authHandler.Refresh)
 	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.JwtMiddleware(authSvc))
 		r.Get("/projects", projectsHandler.List)
 		r.Post("/projects", projectsHandler.Create)
+		r.Get("/users/{id}", authHandler.GetUserProfile)
+		r.Get("/users/{id}/manager", authHandler.GetUserManager)
+		r.Get("/users/{id}/subordinates", authHandler.GetUserSubordinates)
+		r.Get("/hierarchy", authHandler.GetHierarchy)
 	})
 
 	return r

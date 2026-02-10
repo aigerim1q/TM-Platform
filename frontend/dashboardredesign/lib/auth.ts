@@ -1,3 +1,5 @@
+import { api, getApiErrorMessage, setTokens } from "./api";
+
 type LoginPayload = {
   email: string;
   password: string;
@@ -14,64 +16,44 @@ type RegisterPayload = {
 };
 
 type AuthResponse = {
-  token: string;
+  accessToken: string;
+  refreshToken: string;
 };
 
-const API_BASE = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080").replace(/\/$/, "");
-
-function getErrorMessage(res: Response, data: any) {
-  if (data && typeof data === "object" && data.error) {
-    return String(data.error);
-  }
-  return `Request failed (${res.status})`;
-}
+type UserResponse = {
+  id: string;
+  email: string;
+  role: string;
+  manager_id?: string | null;
+  created_at: string;
+};
 
 export async function login(payload: LoginPayload) {
-  const res = await fetch(`${API_BASE}/auth/login`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  try {
+    const { data } = await api.post<AuthResponse>("/auth/login", {
       email: payload.email,
       password: payload.password,
-    }),
-  });
+    });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(getErrorMessage(res, data));
+    if (data.accessToken && data.refreshToken) {
+      setTokens({ accessToken: data.accessToken, refreshToken: data.refreshToken });
+    }
+
+    return data;
+  } catch (error) {
+    throw new Error(getApiErrorMessage(error));
   }
-
-  const { token } = data as AuthResponse;
-  if (token) {
-    localStorage.setItem("auth_token", token);
-  }
-
-  return data as AuthResponse;
 }
 
 export async function register(payload: RegisterPayload) {
-  const res = await fetch(`${API_BASE}/auth/register`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  try {
+    const { data } = await api.post<UserResponse>("/auth/register", {
       email: payload.email,
       password: payload.password,
-    }),
-  });
+    });
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(getErrorMessage(res, data));
+    return data;
+  } catch (error) {
+    throw new Error(getApiErrorMessage(error));
   }
-
-  const { token } = data as AuthResponse;
-  if (token) {
-    localStorage.setItem("auth_token", token);
-  }
-
-  return data as AuthResponse;
 }
