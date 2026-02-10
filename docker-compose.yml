@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: tm_platform_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tm_user
+      POSTGRES_PASSWORD: tm_password
+      POSTGRES_DB: tm_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - tm_platform_pgdata:/var/lib/postgresql/data
+
+  migrate:
+    image: migrate/migrate:v4.17.0
+    container_name: tm_platform_migrate
+    depends_on:
+      - postgres
+    volumes:
+      - ./backend/migrations:/migrations
+    command: ["-path", "/migrations", "-database", "postgres://tm_user:tm_password@postgres:5432/tm_db?sslmode=disable", "up"]
+    restart: on-failure
+
+  frontend:
+    build:
+      context: ./frontend/dashboardredesign
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: "http://localhost:8080"
+    container_name: tm_platform_frontend
+    environment:
+      NEXT_PUBLIC_API_URL: "http://localhost:8080"
+    ports:
+      - "3000:3000"
+
+volumes:
+  tm_platform_pgdata:

@@ -1,0 +1,18 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: tm_platform_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tm_user
+      POSTGRES_PASSWORD: tm_password
+      POSTGRES_DB: tm_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - tm_platform_pgdata:/var/lib/postgresql/data
+
+volumes:
+  tm_platform_pgdata:
