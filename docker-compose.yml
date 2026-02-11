@@ -22,6 +22,26 @@ services:
     command: ["-path", "/migrations", "-database", "postgres://tm_user:tm_password@postgres:5432/tm_db?sslmode=disable", "up"]
     restart: on-failure
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tm_platform_backend
+    depends_on:
+      - postgres
+      - migrate
+    environment:
+      SERVER_ADDR: ":8080"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "tm_user"
+      DB_PASSWORD: "tm_password"
+      DB_NAME: "tm_db"
+      DB_SSLMODE: "disable"
+      JWT_SECRET: "change_me"
+    ports:
+      - "8080:8080"
+
   frontend:
     build:
       context: ./frontend/dashboardredesign
@@ -29,6 +49,8 @@ services:
       args:
         NEXT_PUBLIC_API_URL: "http://localhost:8080"
     container_name: tm_platform_frontend
+    depends_on:
+      - backend
     environment:
       NEXT_PUBLIC_API_URL: "http://localhost:8080"
     ports:

@@ -1,6 +1,9 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+
 import Header from '@/components/header';
+import { getHierarchy, type HierarchyNode } from '@/lib/users';
 import { cn } from '@/lib/utils';
 
 type StatusType = 'free' | 'busy' | 'sick';
@@ -15,202 +18,22 @@ interface Person {
   isCeo?: boolean;
 }
 
-const orgData: Person = {
-  title: 'Генеральный директор',
-  name: 'Саламат Ахмедов',
-  status: 'busy',
-  isCeo: true,
-  note: 'Руководит всей компанией, утверждает проекты и формирует ключевую иерархию.',
-  children: [
-    {
-      title: 'Отдел внутреннего аудита',
-      name: 'Руководитель: Алмас Садыков',
-      status: 'free',
-      isDept: true,
-      note: 'Отвечает за проверки проектов, прозрачность процессов и контроль качества.',
-      children: [
-        {
-          title: 'Внутренний аудитор',
-          name: 'Айдын Рахимбаев',
-          status: 'busy',
-          note: 'Проводит внутренние аудиты, пишет комментарии по рискам и нарушениям.',
-        },
-        {
-          title: 'Внутренний аудитор',
-          name: 'Мади Ержанов',
-          status: 'free',
-        },
-      ],
-    },
-    {
-      title: 'Технический директор (главный инженер)',
-      name: 'Нуржан Ибраев',
-      status: 'busy',
-      isDept: true,
-      note: 'Курирует архитектурный, инженерный, конструкторский отделы и ПТО.',
-      children: [
-        {
-          title: 'Архитектурно-проектный отдел',
-          name: 'Руководитель: Ршыман Зейнулла',
-          status: 'busy',
-          isDept: true,
-          children: [
-            {
-              title: 'Главный архитектор',
-              name: 'Ршыман Зейнулла',
-              status: 'busy',
-              note: 'Утверждает архитектурные решения, планировки и фасады по объектам.',
-            },
-            {
-              title: 'Архитектор',
-              name: 'Омар Ахмед',
-              status: 'free',
-              note: 'Разрабатывает рабочие чертежи и узлы здания.',
-            },
-            {
-              title: 'Архитектор',
-              name: 'Диас Мухамеджанов',
-              status: 'busy',
-            },
-          ],
-        },
-        {
-          title: 'Отдел дизайнеров',
-          name: 'Руководитель: Алия Токжан',
-          status: 'busy',
-          isDept: true,
-          note: 'Делает дизайн экстерьера и интерьера, после чего подключается IT-отдел.',
-          children: [
-            {
-              title: 'Руководитель отдела дизайнеров',
-              name: 'Алия Токжан',
-              status: 'busy',
-            },
-            {
-              title: 'Дизайнер интерьера',
-              name: 'Айжан Курманова',
-              status: 'free',
-            },
-            {
-              title: 'Дизайнер экстерьера',
-              name: 'Темирлан Оспанов',
-              status: 'busy',
-            },
-          ],
-        },
-        {
-          title: 'ПТО',
-          name: 'Руководитель: Марат Алиев',
-          status: 'free',
-          isDept: true,
-          children: [
-            {
-              title: 'Начальник ПТО',
-              name: 'Марат Алиев',
-              status: 'busy',
-            },
-            {
-              title: 'Инженер ПТО',
-              name: 'Ильяс Койшыбаев',
-              status: 'free',
-            },
-          ],
-        },
-      ],
-    },
-    {
-      title: 'Директор по строительству',
-      name: 'Ербол Кенжебаев',
-      status: 'busy',
-      isDept: true,
-      children: [
-        {
-          title: 'Руководители строительных участков',
-          name: 'Куратор: Ернар Абдрахманов',
-          status: 'busy',
-          isDept: true,
-          children: [
-            {
-              title: 'Руководитель группы прорабов',
-              name: 'Ернар Абдрахманов',
-              status: 'busy',
-            },
-            {
-              title: 'Прораб',
-              name: 'Бекзат Жанабаев',
-              status: 'busy',
-            },
-            {
-              title: 'Прораб',
-              name: 'Расул Даулетов',
-              status: 'free',
-            },
-          ],
-        },
-      ],
-    },
-    {
-      title: 'IT-отдел',
-      name: 'Руководитель: Тимур Азимов',
-      status: 'busy',
-      isDept: true,
-      note: 'Занимается разработкой портала и внутренних систем после того, как дизайнеры завершат визуальную часть.',
-      children: [
-        {
-          title: 'Руководитель IT-отдела',
-          name: 'Тимур Азимов',
-          status: 'busy',
-        },
-        {
-          title: 'Frontend-разработчик',
-          name: 'Захар Ким',
-          status: 'free',
-        },
-        {
-          title: 'Backend-разработчик',
-          name: 'Мухаммед Алиев',
-          status: 'busy',
-        },
-        {
-          title: 'IT-поддержка',
-          name: 'Асель Ибрашева',
-          status: 'sick',
-        },
-      ],
-    },
-    {
-      title: 'Отдел кадров (HR)',
-      name: 'Руководитель: Динара Байжан',
-      status: 'free',
-      isDept: true,
-      children: [
-        {
-          title: 'Руководитель HR-отдела',
-          name: 'Динара Байжан',
-          status: 'busy',
-        },
-        {
-          title: 'HR-специалист',
-          name: 'Сания Рахматулла',
-          status: 'free',
-          note: 'В реальной системе именно HR создаёт профили, размещает в иерархии и отмечает статус (в том числе «болен»).',
-        },
-      ],
-    },
-    {
-      title: 'Юридический отдел',
-      name: 'Руководитель: Аскар Утегенов',
-      status: 'free',
-      isDept: true,
-    },
-    {
-      title: 'Коммерческий отдел / Отдел продаж',
-      name: 'Руководитель: Рустам Жаксылыков',
-      status: 'busy',
-      isDept: true,
-    },
-  ],
-};
+const MAX_DEPTH = 6;
+
+function mapHierarchyNode(node: HierarchyNode, depth: number): Person {
+  const hasMore = Array.isArray(node.subordinates) && node.subordinates.length > 0;
+  const children = depth >= MAX_DEPTH
+    ? []
+    : (node.subordinates || []).map((child) => mapHierarchyNode(child, depth + 1));
+
+  return {
+    title: node.role || 'Сотрудник',
+    name: node.email,
+    status: 'free',
+    note: depth >= MAX_DEPTH && hasMore ? 'Глубина ограничена' : undefined,
+    children,
+  };
+}
 
 function StatusBadge({ status }: { status: StatusType }) {
   const statusConfig = {
@@ -267,24 +90,67 @@ function PersonCard({ person }: { person: Person }) {
 }
 
 
-function OrgNode({ person }: { person: Person }) {
+function OrgNode({ person, depth = 0 }: { person: Person; depth?: number }) {
   const hasChildren = person.children && person.children.length > 0;
+  const canRenderChildren = hasChildren && depth < MAX_DEPTH;
 
   return (
     <li className="relative text-center pt-5 px-2">
       <PersonCard person={person} />
-      {hasChildren && (
+      {canRenderChildren && (
         <ul className="flex justify-center pt-7 relative before:content-[''] before:absolute before:top-0 before:left-1/2 before:border-l before:border-gray-300 before:h-6">
           {person.children!.map((child, index) => (
-            <OrgNode key={index} person={child} />
+            <OrgNode key={index} person={child} depth={depth + 1} />
           ))}
         </ul>
+      )}
+      {hasChildren && !canRenderChildren && (
+        <div className="mt-2 text-xs text-gray-500">Глубина ограничена</div>
       )}
     </li>
   );
 }
 
 export default function HierarchyPage() {
+  const [orgTree, setOrgTree] = useState<Person | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let isMounted = true;
+    setLoading(true);
+    setError(null);
+
+    getHierarchy()
+      .then((data) => {
+        if (!isMounted) return;
+
+        if (Array.isArray(data)) {
+          setOrgTree({
+            title: 'Компания',
+            name: 'Организационная структура',
+            status: 'free',
+            isCeo: true,
+            children: data.map((item) => mapHierarchyNode(item, 1)),
+          });
+        } else {
+          setOrgTree(mapHierarchyNode(data, 0));
+        }
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setError('Ошибка загрузки иерархии');
+      })
+      .finally(() => {
+        if (!isMounted) return;
+        setLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   return (
     <div className="min-h-screen bg-gray-50 dark:bg-background">
       {/* Header - centered */}
@@ -295,14 +161,24 @@ export default function HierarchyPage() {
         <h1 className="text-xl font-semibold text-center mb-2 text-gray-900 dark:text-white">Иерархия строительной компании</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 text-center mb-8">Организационная структура с отделами и сотрудниками</p>
 
+        {loading && (
+          <p className="text-center text-sm text-gray-500">Загрузка...</p>
+        )}
+
+        {error && !loading && (
+          <p className="text-center text-sm text-red-600">{error}</p>
+        )}
+
         {/* Org Chart */}
-        <div className="overflow-x-auto pb-10">
-          <div className="flex justify-center min-w-max">
-            <ul className="flex justify-center org-chart">
-              <OrgNode person={orgData} />
-            </ul>
+        {!loading && !error && orgTree && (
+          <div className="overflow-x-auto pb-10">
+            <div className="flex justify-center min-w-max">
+              <ul className="flex justify-center org-chart">
+                <OrgNode person={orgTree} />
+              </ul>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
       <style jsx>{`
