@@ -41,6 +41,8 @@ services:
       JWT_SECRET: "change_me"
     ports:
       - "8080:8080"
+    volumes:
+      - ./uploads:/app/uploads
 
   frontend:
     build:

@@ -1,0 +1,2 @@
+-- Best-effort down migration (keep as noop to avoid accidental data loss).
+-- Intentionally left blank.

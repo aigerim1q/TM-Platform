@@ -1,15 +1,118 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { ChevronRight, Clock, Users, AlertCircle, Send, Flag, Share2, Copy, X, Search, UserPlus, Calendar, ChevronDown, Paperclip, Star } from 'lucide-react';
+import { ChevronRight, Clock, Users, AlertCircle, Send, Share2, Copy, X, Search, UserPlus, Calendar, ChevronDown, Paperclip, Star } from 'lucide-react';
 import Header from '@/components/header';
 import ResponsiblePersonsModal from '@/components/responsible-persons-modal';
+import DelayReportsModal from '@/components/delay-reports-modal';
+import { api, getApiErrorMessage, getApiStatus, getCurrentUserId } from '@/lib/api';
+import { packTaskBlocks, unpackTaskBlocks, type EditorBlock } from '@/components/editor/taskBlockMeta';
+import { getDisplayNameFromEmail } from '@/lib/utils';
+
+type TaskResponse = {
+  id: string;
+  stage_id: string;
+  project_id: string;
+  title: string;
+  status: string;
+  start_date?: string | null;
+  startDate?: string | null;
+  deadline?: string | null;
+  blocks?: unknown;
+  updated_at?: string;
+  updatedAt?: string;
+};
+
+type ProjectMemberEntity = {
+  user: {
+    id: string;
+    email: string;
+  };
+  role: 'owner' | 'manager' | 'member';
+};
+
+type DelayReportEntity = {
+  id: string;
+  task_id?: string | null;
+  taskId?: string | null;
+  message: string;
+  created_at?: string;
+  createdAt?: string;
+};
+
+type TaskCommentEntity = {
+  id: string;
+  message: string;
+  created_at?: string;
+  createdAt?: string;
+  author?: {
+    email?: string;
+  };
+};
+
+type TaskHistoryEntity = {
+  id: string;
+  message: string;
+  created_at?: string;
+  createdAt?: string;
+  author?: {
+    email?: string;
+  };
+};
+
+type TaskViewStage = {
+  title: string;
+  description: string;
+  status: string;
+  days?: string;
+};
+
+type TaskViewData = {
+  title: string;
+  deadline: string;
+  startDate: string;
+  responsible: string[];
+  issue: string;
+  preparation: string[];
+  stages: TaskViewStage[];
+};
+
+function formatTaskDate(input?: string | null) {
+  if (!input) return '—';
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) {
+    return String(input);
+  }
+  return parsed.toLocaleDateString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+}
+
+function toDateInputValue(input?: string | null) {
+  if (!input) return '';
+  const parsed = new Date(input);
+  if (Number.isNaN(parsed.getTime())) return '';
+  return parsed.toISOString().slice(0, 10);
+}
+
+function getRoleLabel(role?: string) {
+  if (role === 'owner') return 'Владелец';
+  if (role === 'manager') return 'Менеджер';
+  return 'Участник проекта';
+}
 
 export default function TaskDetail() {
   const router = useRouter();
   const params = useParams();
+  const rawId = String(params.id || '');
+  const isTaskPage = rawId.startsWith('task-');
+  const taskId = isTaskPage ? rawId.slice(5) : '';
   const [isDelegateModalOpen, setIsDelegateModalOpen] = useState(false);
+  const [isCompleteConfirmOpen, setIsCompleteConfirmOpen] = useState(false);
+  const [isPostponeConfirmOpen, setIsPostponeConfirmOpen] = useState(false);
   const [selectedPerson, setSelectedPerson] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [delegateDueDate, setDelegateDueDate] = useState('');
@@ -17,6 +120,370 @@ export default function TaskDetail() {
   const [delegateComment, setDelegateComment] = useState('');
   const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
   const [isResponsibleModalOpen, setIsResponsibleModalOpen] = useState(false);
+  const [isDelayReportsModalOpen, setIsDelayReportsModalOpen] = useState(false);
+  const [task, setTask] = useState<TaskResponse | null>(null);
+  const [taskAssignees, setTaskAssignees] = useState<string[]>([]);
+  const [taskBlocks, setTaskBlocks] = useState<EditorBlock[]>([]);
+  const [taskComments, setTaskComments] = useState<TaskCommentEntity[]>([]);
+  const [taskHistory, setTaskHistory] = useState<TaskHistoryEntity[]>([]);
+  const [commentText, setCommentText] = useState('');
+  const [isSendingComment, setIsSendingComment] = useState(false);
+  const [isUpdatingTaskStatus, setIsUpdatingTaskStatus] = useState(false);
+  const [isDelegatingTask, setIsDelegatingTask] = useState(false);
+  const [taskActionMessage, setTaskActionMessage] = useState<string | null>(null);
+  const [showCompletedStages, setShowCompletedStages] = useState(false);
+  const [taskDelayReason, setTaskDelayReason] = useState<string | null>(null);
+  const [taskProjectTitle, setTaskProjectTitle] = useState('');
+  const [projectMembers, setProjectMembers] = useState<ProjectMemberEntity[]>([]);
+  const [isAssigneeModalOpen, setIsAssigneeModalOpen] = useState(false);
+  const [assigneeSelection, setAssigneeSelection] = useState<string[]>([]);
+  const [isSavingAssignees, setIsSavingAssignees] = useState(false);
+  const [isLoadingTask, setIsLoadingTask] = useState(false);
+  const [isTaskNotFound, setIsTaskNotFound] = useState(false);
+  const [taskError, setTaskError] = useState<string | null>(null);
+  const currentUserId = getCurrentUserId();
+
+  useEffect(() => {
+    if (!isTaskPage || !taskId) {
+      setTask(null);
+      setTaskAssignees([]);
+      setTaskBlocks([]);
+      setTaskComments([]);
+      setTaskHistory([]);
+      setTaskError(null);
+      setIsTaskNotFound(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadTask = async () => {
+      setIsLoadingTask(true);
+      setTaskError(null);
+      setIsTaskNotFound(false);
+
+      try {
+        const [{ data }, { data: commentsData }, { data: historyData }] = await Promise.all([
+          api.get<TaskResponse>(`/tasks/${taskId}`),
+          api.get<TaskCommentEntity[]>(`/tasks/${taskId}/comments`),
+          api.get<TaskHistoryEntity[]>(`/tasks/${taskId}/history`),
+        ]);
+        if (cancelled) {
+          return;
+        }
+
+        setTask(data);
+        const unpacked = unpackTaskBlocks(data?.blocks);
+        setTaskAssignees(unpacked.assignees);
+        setTaskBlocks(unpacked.blocks);
+        setTaskComments(Array.isArray(commentsData) ? commentsData : []);
+        setTaskHistory(Array.isArray(historyData) ? historyData : []);
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+        if (getApiStatus(error) === 404) {
+          setIsTaskNotFound(true);
+          setTask(null);
+          setTaskAssignees([]);
+          return;
+        }
+        setTaskError(getApiErrorMessage(error, 'Не удалось загрузить задачу'));
+      } finally {
+        if (!cancelled) {
+          setIsLoadingTask(false);
+        }
+      }
+    };
+
+    void loadTask();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTaskPage, taskId]);
+
+  useEffect(() => {
+    if (!isTaskPage || !task?.project_id || !task?.id) {
+      setTaskDelayReason(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadDelayReason = async () => {
+      try {
+        const { data } = await api.get<DelayReportEntity[]>(`/projects/${task.project_id}/delay-report`);
+        if (cancelled) {
+          return;
+        }
+
+        const reports = Array.isArray(data) ? data : [];
+        const filtered = reports.filter((report) => {
+          const reportTaskId = (report.task_id || report.taskId || '').trim();
+          return reportTaskId === task.id;
+        });
+
+        const latest = [...filtered].sort((a, b) => {
+          const aTime = new Date(a.created_at || a.createdAt || '').getTime();
+          const bTime = new Date(b.created_at || b.createdAt || '').getTime();
+          return bTime - aTime;
+        })[0];
+
+        setTaskDelayReason(latest?.message?.trim() || null);
+      } catch {
+        if (!cancelled) {
+          setTaskDelayReason(null);
+        }
+      }
+    };
+
+    void loadDelayReason();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTaskPage, task?.id, task?.project_id]);
+
+  useEffect(() => {
+    if (!isTaskPage || !task?.project_id) {
+      setProjectMembers([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadMembers = async () => {
+      try {
+        const { data } = await api.get<ProjectMemberEntity[]>(`/projects/${task.project_id}/members`);
+        if (cancelled) {
+          return;
+        }
+        setProjectMembers(Array.isArray(data) ? data : []);
+      } catch {
+        if (!cancelled) {
+          setProjectMembers([]);
+        }
+      }
+    };
+
+    void loadMembers();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTaskPage, task?.project_id]);
+
+  useEffect(() => {
+    if (!isTaskPage || !task?.project_id) {
+      setTaskProjectTitle('');
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadProjectTitle = async () => {
+      try {
+        const { data } = await api.get<{ title?: string }>(`/projects/${task.project_id}`);
+        if (cancelled) return;
+        setTaskProjectTitle(String(data?.title || ''));
+      } catch {
+        if (!cancelled) {
+          setTaskProjectTitle('');
+        }
+      }
+    };
+
+    void loadProjectTitle();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isTaskPage, task?.project_id]);
+
+  const currentTaskUserRole = useMemo<'owner' | 'manager' | 'member'>(() => {
+    const matchedMember = projectMembers.find((member) => member.user.id === currentUserId);
+    return matchedMember?.role || 'member';
+  }, [currentUserId, projectMembers]);
+
+  const currentUserEmail = useMemo(() => {
+    const matchedMember = projectMembers.find((member) => member.user.id === currentUserId);
+    return String(matchedMember?.user.email || '').trim().toLowerCase();
+  }, [currentUserId, projectMembers]);
+
+  const isCurrentUserTaskAssignee = useMemo(() => {
+    const normalizedAssignees = new Set(taskAssignees.map((item) => String(item || '').trim().toLowerCase()).filter(Boolean));
+    const normalizedUserID = String(currentUserId || '').trim().toLowerCase();
+    if (normalizedUserID && normalizedAssignees.has(normalizedUserID)) {
+      return true;
+    }
+    if (currentUserEmail && normalizedAssignees.has(currentUserEmail)) {
+      return true;
+    }
+    return false;
+  }, [currentUserEmail, currentUserId, taskAssignees]);
+
+  const canInviteToTask = isTaskPage && currentTaskUserRole === 'owner';
+  const canDelegateTask = isTaskPage
+    && (currentTaskUserRole === 'owner' || currentTaskUserRole === 'manager' || isCurrentUserTaskAssignee);
+
+  const memberNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    projectMembers.forEach((member) => {
+      map.set(member.user.id, getDisplayNameFromEmail(member.user.email));
+    });
+    return map;
+  }, [projectMembers]);
+
+  const visibleTaskAssignees = useMemo(() => {
+    return taskAssignees.map((assignee) => memberNameById.get(assignee) || assignee);
+  }, [memberNameById, taskAssignees]);
+
+  const toggleAssignee = (memberId: string) => {
+    setAssigneeSelection((prev) => {
+      if (prev.includes(memberId)) {
+        return prev.filter((id) => id !== memberId);
+      }
+      return [...prev, memberId];
+    });
+  };
+
+  const saveTaskAssignees = async () => {
+    if (!task || isSavingAssignees) {
+      return;
+    }
+
+    const unpacked = unpackTaskBlocks(task.blocks);
+    const normalizedAssignees = Array.from(new Set(assigneeSelection.map((id) => String(id || '').trim()).filter(Boolean)));
+
+    setIsSavingAssignees(true);
+    setTaskError(null);
+    try {
+      const { data } = await api.patch<TaskResponse>(`/tasks/${task.id}`, {
+        title: task.title,
+        status: task.status,
+        startDate: task.start_date || task.startDate || null,
+        deadline: task.deadline || null,
+        assignees: normalizedAssignees,
+        blocks: packTaskBlocks(unpacked.blocks, normalizedAssignees),
+        expected_updated_at: task.updated_at || task.updatedAt,
+      });
+
+      setTask(data || task);
+      setTaskAssignees(normalizedAssignees);
+      setIsAssigneeModalOpen(false);
+    } catch (error) {
+      setTaskError(getApiErrorMessage(error, 'Не удалось назначить ответственных по задаче'));
+    } finally {
+      setIsSavingAssignees(false);
+    }
+  };
+
+  const refreshTaskContext = async () => {
+    if (!task?.id) {
+      return;
+    }
+
+    const [{ data }, { data: commentsData }, { data: historyData }] = await Promise.all([
+      api.get<TaskResponse>(`/tasks/${task.id}`),
+      api.get<TaskCommentEntity[]>(`/tasks/${task.id}/comments`),
+      api.get<TaskHistoryEntity[]>(`/tasks/${task.id}/history`),
+    ]);
+
+    setTask(data || task);
+    const unpacked = unpackTaskBlocks(data?.blocks);
+    setTaskAssignees(unpacked.assignees);
+    setTaskBlocks(unpacked.blocks);
+    setTaskComments(Array.isArray(commentsData) ? commentsData : []);
+    setTaskHistory(Array.isArray(historyData) ? historyData : []);
+  };
+
+  const updateTaskStatus = async (nextStatus: 'done' | 'in_progress' | 'delayed') => {
+    if (!task) {
+      return;
+    }
+
+    setIsUpdatingTaskStatus(true);
+    setTaskError(null);
+    try {
+      await api.patch(`/tasks/${task.id}`, {
+        title: task.title,
+        status: nextStatus,
+        startDate: task.start_date || task.startDate || null,
+        deadline: task.deadline || null,
+        assignees: taskAssignees,
+        blocks: packTaskBlocks(taskBlocks, taskAssignees),
+        expected_updated_at: task.updated_at || task.updatedAt,
+      });
+
+      await refreshTaskContext();
+      if (nextStatus === 'done') {
+        setTaskActionMessage('Задача успешно завершена. Возвращаемся на дашборд...');
+        window.setTimeout(() => {
+          router.push('/dashboard');
+        }, 900);
+      } else {
+        setTaskActionMessage(
+          nextStatus === 'delayed'
+            ? 'Задача отложена'
+            : 'Статус задачи обновлен',
+        );
+      }
+    } catch (error) {
+      setTaskError(getApiErrorMessage(error, 'Не удалось обновить статус задачи'));
+    } finally {
+      setIsUpdatingTaskStatus(false);
+    }
+  };
+
+  const isTaskDone = (task?.status || '').toLowerCase() === 'done' || (task?.status || '').toLowerCase() === 'completed';
+  const isTaskDelayed = (task?.status || '').toLowerCase() === 'delayed';
+
+  const sendTaskComment = async () => {
+    const text = commentText.trim();
+    if (!task?.id || !text || isSendingComment) {
+      return;
+    }
+
+    setIsSendingComment(true);
+    try {
+      await api.post(`/tasks/${task.id}/comment`, { message: text });
+      setCommentText('');
+      await refreshTaskContext();
+    } catch (error) {
+      setTaskError(getApiErrorMessage(error, 'Не удалось отправить комментарий'));
+    } finally {
+      setIsSendingComment(false);
+    }
+  };
+
+  const dynamicPreparation = useMemo(() => {
+    if (!isTaskPage) {
+      return [] as string[];
+    }
+
+    return taskBlocks
+      .filter((block) => block.type === 'text')
+      .map((block) => String(block.content || '').trim())
+      .filter(Boolean);
+  }, [isTaskPage, taskBlocks]);
+
+  const dynamicStages = useMemo<TaskViewStage[]>(() => {
+    if (!isTaskPage) {
+      return [] as TaskViewStage[];
+    }
+
+    return taskBlocks
+      .filter((block) => block.type === 'subtask')
+      .map((block) => {
+        const isDone = Boolean(block.isCompleted);
+        return {
+          title: String(block.content || '').trim() || 'Подзадача',
+          description: '',
+          status: isDone ? 'Выполнено' : 'В работе',
+        };
+      });
+  }, [isTaskPage, taskBlocks]);
 
   const historyItems = [
     {
@@ -77,15 +544,78 @@ export default function TaskDetail() {
   ];
 
   const teamMembers = [
-    { id: '1', name: 'Алия К.', role: 'Инженер ПТО', avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&h=100&fit=crop&crop=face', status: 'available', statusText: 'Свободна: 4ч сегодня', recommended: true, match: 98 },
-    { id: '2', name: 'Данияр С.', role: 'Снабжение', avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100&h=100&fit=crop&crop=face', status: 'busy', statusText: 'Занят до 16:00', recommended: false, match: 0 },
-    { id: '3', name: 'Ержан Б.', role: 'Прораб', avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&h=100&fit=crop&crop=face', status: 'offline', statusText: 'Оффлайн', recommended: false, match: 0 },
+    ...projectMembers
+      .filter((member) => member.user.id !== currentUserId)
+      .map((member) => ({
+        id: member.user.id,
+        name: getDisplayNameFromEmail(member.user.email),
+        role: member.role,
+        avatar: `https://api.dicebear.com/7.x/initials/svg?seed=${encodeURIComponent(member.user.email)}`,
+        status: 'available' as const,
+        statusText: getRoleLabel(member.role),
+      })),
   ];
 
   const filteredMembers = teamMembers.filter(member =>
     member.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     member.role.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const handleDelegateTask = async () => {
+    if (!task || !selectedPerson || isDelegatingTask) {
+      return;
+    }
+
+    if (!canDelegateTask) {
+      setTaskError('Делегировать задачу может owner, manager или назначенный исполнитель');
+      return;
+    }
+
+    const delegatedTo = String(selectedPerson || '').trim();
+    if (!delegatedTo) {
+      return;
+    }
+
+    setIsDelegatingTask(true);
+    setTaskError(null);
+    try {
+      await api.patch(`/tasks/${task.id}`, {
+        title: task.title,
+        status: 'in_progress',
+        startDate: task.start_date || task.startDate || null,
+        deadline: delegateDueDate ? new Date(`${delegateDueDate}T00:00:00.000Z`).toISOString() : (task.deadline || null),
+        assignees: [delegatedTo],
+        blocks: packTaskBlocks(taskBlocks, [delegatedTo]),
+        expected_updated_at: task.updated_at || task.updatedAt,
+      });
+
+      if (task.project_id) {
+        const userName = memberNameById.get(delegatedTo) || delegatedTo;
+        const extra = [
+          delegatePriority ? `Приоритет: ${delegatePriority}` : '',
+          delegateComment.trim() ? `Комментарий: ${delegateComment.trim()}` : '',
+        ].filter(Boolean).join(' • ');
+        await api.post(`/projects/${task.project_id}/delay-report`, {
+          taskId: task.id,
+          message: extra
+            ? `Задача делегирована пользователю: ${userName}. ${extra}`
+            : `Задача делегирована пользователю: ${userName}`,
+        });
+      }
+
+      await refreshTaskContext();
+      setTaskActionMessage('Задача успешно делегирована');
+      setIsDelegateModalOpen(false);
+      setSelectedPerson(null);
+      setSearchQuery('');
+      setDelegateComment('');
+      setDelegateDueDate('');
+    } catch (error) {
+      setTaskError(getApiErrorMessage(error, 'Не удалось делегировать задачу'));
+    } finally {
+      setIsDelegatingTask(false);
+    }
+  };
 
   const responsiblePersons = [
     {
@@ -108,7 +638,7 @@ export default function TaskDetail() {
     },
   ];
 
-  const taskData = {
+  const taskData: TaskViewData = {
     title: 'Возведение колонн на 1 этаже несущих конструкции',
     deadline: '26.11.2025 23:59 (-9 часов)',
     startDate: 'Дата начала: 15.11.2025 12:00',
@@ -138,25 +668,36 @@ export default function TaskDetail() {
         days: '-9 часов',
       },
     ],
-    comments: [
-      {
-        author: 'Зейнулла Ршыман',
-        time: '1 ч.з.',
-        text: 'А почему она может быть крива?\nМы же проверили уровни на прошлой неделе.',
-      },
-      {
-        author: 'Айды Р',
-        role: 'изменил статус на',
-        status: 'в работе',
-        time: '',
-      },
-      {
-        author: 'Там была проблема с виниграми. Используемые ножи заменены сегодня.',
-        text: 'Там была проблема с виниграми. Используемые ножи заменены сегодня.',
-        time: 'Прошедшая запись',
-      },
-    ],
   };
+
+  const displayTaskData = useMemo(() => {
+    if (!isTaskPage || !task) {
+      return taskData;
+    }
+
+    return {
+      ...taskData,
+      title: task.title || taskData.title,
+      deadline: formatTaskDate(task.deadline),
+      startDate: `Дата начала: ${formatTaskDate(task.start_date || task.startDate)}`,
+      responsible: visibleTaskAssignees.length > 0 ? visibleTaskAssignees : taskData.responsible,
+      issue: taskDelayReason || taskData.issue,
+      preparation: dynamicPreparation.length > 0 ? dynamicPreparation : taskData.preparation,
+      stages: dynamicStages,
+    };
+  }, [dynamicPreparation, dynamicStages, isTaskPage, task, taskDelayReason, visibleTaskAssignees]);
+
+  const completedStagesCount = useMemo(
+    () => displayTaskData.stages.filter((stage) => stage.status === 'Выполнено').length,
+    [displayTaskData.stages],
+  );
+
+  const visibleStages = useMemo(() => {
+    if (showCompletedStages) {
+      return displayTaskData.stages;
+    }
+    return displayTaskData.stages.filter((stage) => stage.status !== 'Выполнено');
+  }, [displayTaskData.stages, showCompletedStages]);
 
   return (
     <div className="min-h-screen bg-white dark:bg-background pb-20">
@@ -167,7 +708,7 @@ export default function TaskDetail() {
         {/* Top Navigation */}
         <div className="flex flex-col md:flex-row items-center gap-3 mb-10">
           <button
-            onClick={() => router.push('/')}
+            onClick={() => router.push('/dashboard')}
             className="w-full md:w-auto flex items-center justify-center gap-2 px-6 py-2 rounded-full border border-gray-200 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors text-sm font-semibold shadow-sm"
           >
             ← Назад
@@ -175,7 +716,7 @@ export default function TaskDetail() {
 
           <div className="flex w-full md:w-auto gap-3 overflow-x-auto pb-2 md:pb-0">
             <button className="flex-1 md:flex-none bg-black dark:bg-white text-white dark:text-black px-8 py-2 rounded-full text-sm font-semibold shadow-md whitespace-nowrap">
-              Проект
+              {isTaskPage ? 'Задача' : 'Проект'}
             </button>
             <button
               onClick={() => router.push(`/project/${params.id}/reports`)}
@@ -184,46 +725,90 @@ export default function TaskDetail() {
               Отчеты
             </button>
           </div>
+
+          {isTaskPage && Boolean(taskId) && (
+            <button
+              type="button"
+              onClick={() => router.push(`/tasks/${taskId}/edit`)}
+              className="w-full md:w-auto rounded-full bg-amber-600 px-6 py-2 text-sm font-semibold text-white hover:bg-amber-700 transition-colors whitespace-nowrap"
+            >
+              Редактировать задачу
+            </button>
+          )}
         </div>
 
         {/* Title Section */}
         <div className="mb-10">
-          <div className="flex items-center gap-3 text-amber-500 mb-2">
-            <Flag size={18} className="fill-current" />
-            <span className="text-sm font-bold uppercase tracking-wider">Приоритетная задача</span>
-          </div>
-          <h1 className="text-3xl md:text-4xl font-extrabold text-gray-900 dark:text-white tracking-tight leading-tight max-w-4xl">{taskData.title}</h1>
+          <h1 className="text-3xl md:text-4xl font-extrabold text-gray-900 dark:text-white tracking-tight leading-tight max-w-4xl">{displayTaskData.title}</h1>
         </div>
+
+        {isTaskPage && isLoadingTask && (
+          <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+            Loading...
+          </div>
+        )}
+
+        {isTaskPage && isTaskNotFound && (
+          <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
+            Task not found
+          </div>
+        )}
+
+        {taskError && (
+          <div className="mb-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            {taskError}
+          </div>
+        )}
+
+        {taskActionMessage && (
+          <div className="mb-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">
+            {taskActionMessage}
+          </div>
+        )}
 
         {/* Info Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
           {/* Deadline Card */}
           <div className="bg-[#FFF4F4] dark:bg-red-900/20 border border-red-100 dark:border-red-900/50 rounded-[32px] p-6 shadow-sm hover:shadow-md transition-shadow">
             <div className="flex items-start gap-4">
-              <div className="bg-red-500/10 p-2.5 rounded-2xl text-red-600">
+              <div className="bg-red-500/10 dark:bg-red-400/20 p-2.5 rounded-2xl text-red-600 dark:text-red-300">
                 <Clock className="w-6 h-6" />
               </div>
               <div>
-                <p className="text-xs font-bold text-red-900 uppercase tracking-wide mb-1 opacity-60">Дедлайн</p>
-                <p className="text-base text-red-950 font-bold">{taskData.deadline}</p>
-                <p className="text-sm text-red-800/60 mt-0.5">{taskData.startDate}</p>
+                <p className="text-xs font-bold text-red-900 dark:text-red-200 uppercase tracking-wide mb-1 opacity-70 dark:opacity-90">Дедлайн</p>
+                <p className="text-base text-red-950 dark:text-red-100 font-bold leading-snug">{displayTaskData.deadline}</p>
+                <p className="text-sm text-red-800/80 dark:text-red-200/90 mt-0.5">{displayTaskData.startDate}</p>
               </div>
             </div>
           </div>
 
           {/* Responsible Card */}
           <div
-            onClick={() => setIsResponsibleModalOpen(true)}
+            onClick={() => {
+              if (isTaskPage) {
+                if (!canInviteToTask) {
+                  return;
+                }
+                setAssigneeSelection(taskAssignees);
+                setIsAssigneeModalOpen(true);
+                return;
+              }
+              setIsResponsibleModalOpen(true);
+            }}
             className="bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 rounded-[32px] p-6 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
           >
             <div className="flex items-start gap-4">
               <div className="bg-gray-100 dark:bg-gray-700 p-2.5 rounded-2xl text-gray-600 dark:text-gray-300">
                 <Users className="w-6 h-6" />
               </div>
-              <div className="flex-1">
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-wide mb-1">Ответственные</p>
-                <p className="text-base text-gray-900 font-bold leading-tight">{taskData.responsible.join(', ')}</p>
-                <button className="text-amber-600 text-[11px] font-bold mt-2 flex items-center gap-1 hover:underline">
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-bold text-gray-500 dark:text-gray-300 uppercase tracking-wide mb-1">Ответственные</p>
+                <p className="text-base text-gray-900 dark:text-white font-bold leading-tight wrap-break-word">{displayTaskData.responsible.join(', ')}</p>
+                <button
+                  type="button"
+                  disabled={isTaskPage && !canInviteToTask}
+                  className="text-amber-600 disabled:text-gray-400 text-[11px] font-bold mt-2 flex items-center gap-1 hover:underline disabled:no-underline"
+                >
                   УПРАВЛЯТЬ <ChevronRight size={12} />
                 </button>
               </div>
@@ -239,8 +824,12 @@ export default function TaskDetail() {
               </div>
               <div className="flex-1">
                 <p className="text-xs font-bold text-white/50 uppercase tracking-wide mb-1">Проблема / Статус</p>
-                <p className="text-sm text-white font-medium leading-relaxed">{taskData.issue}</p>
-                <button className="text-amber-400 text-[11px] font-bold mt-2 flex items-center gap-1 hover:underline">
+                <p className="text-sm text-white font-medium leading-relaxed">{displayTaskData.issue}</p>
+                <button
+                  type="button"
+                  onClick={() => setIsDelayReportsModalOpen(true)}
+                  className="text-amber-400 text-[11px] font-bold mt-2 flex items-center gap-1 hover:underline"
+                >
                   ПОДРОБНЕЕ <ChevronRight size={12} />
                 </button>
               </div>
@@ -256,7 +845,7 @@ export default function TaskDetail() {
             <div className="mb-8">
               <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Подготовка</h2>
               <ul className="space-y-2">
-                {taskData.preparation.map((item, idx) => (
+                {displayTaskData.preparation.map((item, idx) => (
                   <li key={idx} className={`text-sm ${idx === 1 ? 'bg-yellow-200 dark:bg-yellow-900/50 px-3 py-2 rounded' : ''} text-gray-700 dark:text-gray-300`}>
                     • {item}
                   </li>
@@ -265,54 +854,94 @@ export default function TaskDetail() {
             </div>
 
             {/* Stages Section */}
-            <div>
-              <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Этапы выполнения</h2>
-              <div className="space-y-4">
-                {taskData.stages.map((stage, idx) => (
-                  <div key={idx} className="border border-gray-200 dark:border-gray-700 rounded-xl p-4">
-                    <div className="flex items-start gap-3 mb-3">
-                      <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${stage.status === 'Выполнено' ? 'bg-green-100' : 'bg-orange-100'
-                        }`}>
-                        <div className={`w-4 h-4 rounded-full ${stage.status === 'Выполнено' ? 'bg-green-500' : 'bg-orange-500'
-                          }`} />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="font-semibold text-gray-900 dark:text-white">{stage.title}</h3>
-                        <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">{stage.description}</p>
-                      </div>
-                      <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2">
-                        <span className={`text-xs font-semibold px-3 py-1 rounded-full whitespace-nowrap ${stage.status === 'Выполнено' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+            {displayTaskData.stages.length > 0 && (
+              <div>
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h2 className="text-lg font-bold text-gray-900 dark:text-white">Этапы выполнения</h2>
+                  {completedStagesCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowCompletedStages((prev) => !prev)}
+                      className="text-xs px-3 py-1.5 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                    >
+                      {showCompletedStages ? 'Скрыть выполненные' : `Показать выполненные (${completedStagesCount})`}
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-4">
+                  {visibleStages.map((stage, idx) => (
+                    <div key={idx} className="border border-gray-200 dark:border-gray-700 rounded-xl p-4">
+                      <div className="flex items-start gap-3 mb-3">
+                        <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${stage.status === 'Выполнено' ? 'bg-green-100' : 'bg-orange-100'
                           }`}>
-                          {stage.status}
-                        </span>
-                        {stage.days && <span className="text-xs text-red-600 font-semibold whitespace-nowrap">{stage.days}</span>}
+                          <div className={`w-4 h-4 rounded-full ${stage.status === 'Выполнено' ? 'bg-green-500' : 'bg-orange-500'
+                            }`} />
+                        </div>
+                        <div className="flex-1">
+                          <h3 className="font-semibold text-gray-900 dark:text-white">{stage.title}</h3>
+                          <p className="text-sm text-gray-600 dark:text-gray-400 mt-2">{stage.description}</p>
+                        </div>
+                        <div className="flex flex-col sm:flex-row items-end sm:items-center gap-2">
+                          <span className={`text-xs font-semibold px-3 py-1 rounded-full whitespace-nowrap ${stage.status === 'Выполнено' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                            }`}>
+                            {stage.status}
+                          </span>
+                          {stage.days && <span className="text-xs text-red-600 font-semibold whitespace-nowrap">{stage.days}</span>}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
-              </div>
+                  ))}
 
-              {/* Add Stage Button */}
-              <button className="w-full mt-6 py-2 px-4 border-2 border-yellow-600 text-yellow-600 rounded-full font-semibold hover:bg-yellow-50 transition-colors">
-                + Добавить этап проекта
-              </button>
-            </div>
+                  {visibleStages.length === 0 && (
+                    <div className="rounded-xl border border-gray-200 dark:border-gray-700 p-4 text-sm text-gray-500 dark:text-gray-400">
+                      Все этапы выполнены ✅
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Right Column */}
           <div className="lg:col-span-1">
             {/* Action Buttons */}
-            <div className="bg-yellow-600 rounded-2xl p-4 text-white font-semibold text-center cursor-pointer hover:bg-yellow-700 transition-colors mb-4">
-              ✓ Завершить задачу
-            </div>
+            <button
+              type="button"
+              disabled={isTaskDone || isUpdatingTaskStatus}
+              onClick={() => setIsCompleteConfirmOpen(true)}
+              className="w-full bg-yellow-600 rounded-2xl p-4 text-white font-semibold text-center hover:bg-yellow-700 transition-colors mb-4 disabled:opacity-60"
+            >
+              {isTaskDone ? '✓ Задача завершена' : isUpdatingTaskStatus ? 'Сохраняем...' : '✓ Завершить задачу'}
+            </button>
 
             <div className="grid grid-cols-2 gap-3 mb-6">
-              <button className="py-3 px-4 border-2 border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white font-semibold hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors">
-                Отложить
+              <button
+                type="button"
+                disabled={isUpdatingTaskStatus}
+                onClick={() => {
+                  if (isTaskDelayed) {
+                    void updateTaskStatus('in_progress');
+                    return;
+                  }
+                  setIsPostponeConfirmOpen(true);
+                }}
+                className="py-3 px-4 border-2 border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white font-semibold hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors disabled:opacity-60"
+              >
+                {isTaskDelayed ? 'Возобновить' : 'Отложить'}
               </button>
               <button
-                onClick={() => setIsDelegateModalOpen(true)}
-                className="py-3 px-4 border-2 border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white font-semibold hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors"
+                disabled={isUpdatingTaskStatus}
+                onClick={() => {
+                  if (!canDelegateTask) {
+                    setTaskError('Делегировать задачу может owner, manager или назначенный исполнитель');
+                    return;
+                  }
+                  setSelectedPerson(null);
+                  setSearchQuery('');
+                  setDelegateDueDate(toDateInputValue(task?.deadline));
+                  setIsDelegateModalOpen(true);
+                }}
+                className="py-3 px-4 border-2 border-gray-300 dark:border-gray-600 rounded-lg text-gray-900 dark:text-white font-semibold hover:bg-gray-50 dark:hover:bg-gray-800 transition-colors disabled:opacity-60"
               >
                 Делегировать
               </button>
@@ -344,64 +973,19 @@ export default function TaskDetail() {
               {activeTab === 'comments' ? (
                 <>
                   <div className="space-y-4 mb-6">
-                    {/* Date Separator */}
-                    <div className="flex items-center gap-3 py-2">
-                      <div className="flex-1 h-px bg-gray-300"></div>
-                      <span className="text-gray-400 text-sm font-medium">Сегодня</span>
-                      <div className="flex-1 h-px bg-gray-300"></div>
-                    </div>
-
-                    {/* First Comment */}
-                    <div>
-                      <div className="flex items-start gap-3 mb-2">
-                        <img
-                          src="https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=face"
-                          alt="avatar"
-                          className="w-10 h-10 rounded-full"
-                        />
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <p className="font-semibold text-gray-900 dark:text-white">Зейнулла Ршыман</p>
-                            <p className="text-gray-500 text-xs">14:32</p>
+                    {taskComments.length === 0 ? (
+                      <p className="text-sm text-gray-500 dark:text-gray-400">Комментариев пока нет</p>
+                    ) : (
+                      taskComments.map((item) => (
+                        <div key={item.id} className="rounded-xl bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 px-3 py-3">
+                          <div className="flex items-center gap-2 mb-1">
+                            <p className="font-semibold text-gray-900 dark:text-white text-sm">{getDisplayNameFromEmail(item.author?.email || 'Пользователь')}</p>
+                            <p className="text-gray-500 text-xs">{formatTaskDate(item.created_at || item.createdAt)}</p>
                           </div>
-                          <p className="text-gray-700 dark:text-gray-300 text-sm mt-1">А почему она может быть крива?<br />Мы же проверили уровни на<br />прошлой неделе.</p>
+                          <p className="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap">{item.message}</p>
                         </div>
-                      </div>
-                    </div>
-
-                    {/* Status Change Separator */}
-                    <div className="flex items-center gap-3 py-3 mt-4">
-                      <div className="flex-1 h-px bg-gray-300"></div>
-                      <span className="text-gray-400 text-sm font-medium">Статус изменен</span>
-                      <div className="flex-1 h-px bg-gray-300"></div>
-                    </div>
-
-                    {/* Status Update */}
-                    <div className="flex items-center gap-2 mb-4">
-                      <img
-                        src="https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100&h=100&fit=crop&crop=face"
-                        alt="avatar"
-                        className="w-6 h-6 rounded-full"
-                      />
-                      <p className="text-gray-600 text-sm">Айдын Р. изменил статус на <span className="text-yellow-600 font-semibold">В работе</span></p>
-                    </div>
-
-                    {/* Your Comment */}
-                    <div className="mt-4">
-                      <div className="flex items-end justify-end gap-2 mb-1">
-                        <p className="text-gray-500 text-xs">14:45</p>
-                        <span className="text-gray-600 dark:text-gray-400 text-xs font-semibold">Вы</span>
-                        <img
-                          src="https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&h=100&fit=crop&crop=face"
-                          alt="avatar"
-                          className="w-8 h-8 rounded-full"
-                        />
-                      </div>
-                      <div className="bg-yellow-500 text-white rounded-2xl p-4 max-w-xs ml-auto">
-                        <p className="text-sm">Там была проблема с фиксаторами. Исправили, но нужен доп. контроль сегодня.</p>
-                      </div>
-                      <p className="text-gray-500 text-xs text-right mt-2">Просмотрено</p>
-                    </div>
+                      ))
+                    )}
                   </div>
 
                   {/* Comment Input */}
@@ -410,9 +994,16 @@ export default function TaskDetail() {
                       <input
                         type="text"
                         placeholder="Напишать комментарий..."
+                        value={commentText}
+                        onChange={(e) => setCommentText(e.target.value)}
                         className="flex-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-full px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-yellow-500 placeholder-gray-400 text-gray-900 dark:text-white"
                       />
-                      <button className="bg-yellow-500 text-white w-10 h-10 rounded-full hover:bg-yellow-600 transition-colors flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={() => void sendTaskComment()}
+                        disabled={isSendingComment || commentText.trim().length === 0}
+                        className="bg-yellow-500 text-white w-10 h-10 rounded-full hover:bg-yellow-600 transition-colors flex items-center justify-center disabled:opacity-60"
+                      >
                         <Send className="w-5 h-5" />
                       </button>
                     </div>
@@ -432,105 +1023,16 @@ export default function TaskDetail() {
               ) : (
                 /* History Tab Content */
                 <div className="space-y-1">
-                  {historyItems.map((item, idx) => (
-                    <div key={item.id} className="flex items-start gap-3 py-3">
-                      {/* Timeline line */}
-                      <div className="flex flex-col items-center">
-                        {item.type === 'delegate' ? (
-                          <div className="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center">
-                            <Star className="w-4 h-4 text-amber-600" />
-                          </div>
-                        ) : item.type === 'created' ? (
-                          <div className="w-8 h-8 rounded-full bg-red-100 flex items-center justify-center">
-                            <span className="text-red-600 font-bold text-sm">Q</span>
-                          </div>
-                        ) : (
-                          <img
-                            src={item.avatar}
-                            alt="avatar"
-                            className="w-8 h-8 rounded-full object-cover"
-                          />
-                        )}
-                        {idx < historyItems.length - 1 && (
-                          <div className="w-px h-full min-h-8 bg-gray-200 mt-2" />
-                        )}
+                  {taskHistory.length === 0 ? (
+                    <p className="text-sm text-gray-500 dark:text-gray-400">История пока пустая</p>
+                  ) : (
+                    taskHistory.map((item) => (
+                      <div key={item.id} className="border-l-2 border-amber-400 pl-3 py-2">
+                        <p className="text-sm text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{item.message}</p>
+                        <p className="text-xs text-gray-500 mt-1">{getDisplayNameFromEmail(item.author?.email || 'Пользователь')} • {formatTaskDate(item.created_at || item.createdAt)}</p>
                       </div>
-
-                      {/* Content */}
-                      <div className="flex-1 min-w-0">
-                        {item.type === 'expense' && (
-                          <>
-                            <p className="text-sm text-gray-900 dark:text-white">
-                              <span className="font-semibold">{item.user}</span> {item.action}{' '}
-                              <span className="text-amber-700 dark:text-amber-500">{item.detail}</span>
-                            </p>
-                            <p className="text-xs text-gray-400 mt-1">{item.time}</p>
-                          </>
-                        )}
-
-                        {item.type === 'deadline' && (
-                          <>
-                            <p className="text-sm text-gray-900">
-                              <span className="font-semibold">{item.user}</span> {item.action}
-                            </p>
-                            <p className="text-sm mt-1">
-                              <span className="text-gray-500">{item.oldDate}</span>
-                              <span className="text-gray-400 mx-2">→</span>
-                              <span className="text-amber-600">{item.newDate}</span>
-                            </p>
-                            <p className="text-xs text-gray-400 mt-1">{item.time}</p>
-                          </>
-                        )}
-
-                        {item.type === 'delegate' && (
-                          <>
-                            <p className="text-sm font-semibold text-gray-900 dark:text-white">{item.action}</p>
-                            <div className="bg-gray-100 dark:bg-gray-800 rounded-lg p-2 mt-1">
-                              <p className="text-xs text-gray-600 dark:text-gray-400 italic">{item.detail}</p>
-                            </div>
-                            <p className="text-xs text-gray-400 mt-1">{item.time}</p>
-                          </>
-                        )}
-
-                        {item.type === 'status' && (
-                          <>
-                            <p className="text-sm text-gray-900">
-                              <span className="font-semibold">{item.user}</span> {item.action}
-                            </p>
-                            <div className="flex items-center gap-2 mt-1">
-                              <span className="text-xs text-gray-500 bg-gray-100 dark:bg-gray-800 dark:text-gray-400 px-2 py-1 rounded">{item.oldStatus}</span>
-                              <span className="text-gray-400">→</span>
-                              <span className="text-xs text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/40 px-2 py-1 rounded">{item.newStatus}</span>
-                            </div>
-                            <p className="text-xs text-gray-400 mt-1">{item.time}</p>
-                          </>
-                        )}
-
-                        {item.type === 'file' && (
-                          <>
-                            <p className="text-sm text-gray-900 dark:text-white">
-                              <span className="font-semibold">{item.user}</span> {item.action}{' '}
-                              <span className="text-blue-600 dark:text-blue-400">{item.fileName}</span>
-                            </p>
-                            <p className="text-xs text-gray-400 mt-1">{item.time}</p>
-                          </>
-                        )}
-
-                        {item.type === 'created' && (
-                          <>
-                            <p className="text-sm font-semibold text-gray-900 dark:text-white">{item.action}</p>
-                            <p className="text-xs text-gray-400 mt-1">{item.time}</p>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-
-                  {/* Show all history button */}
-                  <button className="w-full mt-4 py-3 text-gray-500 text-sm font-medium hover:text-gray-700 transition-colors flex items-center justify-center gap-2">
-                    <Clock className="w-4 h-4" />
-                    Показать всю историю
-                  </button>
+                    ))
+                  )}
                 </div>
               )}
             </div>
@@ -576,12 +1078,12 @@ export default function TaskDetail() {
                   <div className="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl p-4 mb-4">
                     <div className="flex items-center gap-2 mb-2">
                       <div className="w-2 h-2 rounded-full bg-yellow-500" />
-                      <span className="text-sm text-gray-600 dark:text-gray-400">Проект: Shyraq</span>
+                      <span className="text-sm text-gray-600 dark:text-gray-400">Проект: {taskProjectTitle || task?.project_id || '—'}</span>
                     </div>
-                    <p className="font-semibold text-gray-900 dark:text-white text-sm leading-tight mb-3">Нужно привести 10 плиток</p>
+                    <p className="font-semibold text-gray-900 dark:text-white text-sm leading-tight mb-3">{task?.title || 'Задача'}</p>
                     <div className="flex items-center gap-2 text-gray-500 text-xs">
                       <Calendar className="w-3.5 h-3.5" />
-                      <span>Создано: Сегодня</span>
+                      <span>Дедлайн: {formatTaskDate(task?.deadline)}</span>
                     </div>
                   </div>
 
@@ -590,8 +1092,7 @@ export default function TaskDetail() {
                     <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">Срок выполнения</p>
                     <div className="relative">
                       <input
-                        type="text"
-                        placeholder="mm/dd/yyyy"
+                        type="date"
                         value={delegateDueDate}
                         onChange={(e) => setDelegateDueDate(e.target.value)}
                         className="w-full px-3 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-yellow-500 placeholder-gray-400 text-gray-900 dark:text-white"
@@ -680,21 +1181,13 @@ export default function TaskDetail() {
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2">
                             <p className="font-semibold text-gray-900 dark:text-white text-sm">{member.name}</p>
-                            {member.recommended && (
-                              <span className="px-2 py-0.5 bg-green-100 dark:bg-green-900/40 text-green-700 dark:text-green-300 text-xs font-medium rounded-full">
-                                Рекомендовано
-                              </span>
-                            )}
                           </div>
                           <p className="text-xs text-gray-500">{member.statusText}</p>
                         </div>
 
                         {/* Match percentage and role */}
                         <div className="text-right flex-shrink-0">
-                          {member.match > 0 && (
-                            <p className="text-sm font-semibold text-green-600">{member.match}% совпадение</p>
-                          )}
-                          <p className="text-xs text-gray-400">{member.role}</p>
+                          <p className="text-xs text-gray-400">{getRoleLabel(member.role)}</p>
                         </div>
                       </div>
                     ))}
@@ -711,18 +1204,12 @@ export default function TaskDetail() {
                   Отмена
                 </button>
                 <button
-                  onClick={() => {
-                    if (selectedPerson) {
-                      setIsDelegateModalOpen(false);
-                      setSelectedPerson(null);
-                      setSearchQuery('');
-                      setDelegateComment('');
-                      setDelegateDueDate('');
-                    }
-                  }}
-                  className="flex items-center gap-2 px-6 py-2.5 bg-amber-600 text-white font-semibold rounded-full hover:bg-amber-700 transition-colors"
+                  type="button"
+                  onClick={() => void handleDelegateTask()}
+                  disabled={!selectedPerson || isDelegatingTask}
+                  className="flex items-center gap-2 px-6 py-2.5 bg-amber-600 text-white font-semibold rounded-full hover:bg-amber-700 transition-colors disabled:opacity-60"
                 >
-                  Делегировать
+                  {isDelegatingTask ? 'Делегирование...' : 'Делегировать'}
                   <Send className="w-4 h-4" />
                 </button>
               </div>
@@ -734,8 +1221,150 @@ export default function TaskDetail() {
         <ResponsiblePersonsModal
           isOpen={isResponsibleModalOpen}
           onClose={() => setIsResponsibleModalOpen(false)}
+          projectId={isTaskPage ? String(task?.project_id || '') : String(params.id || '')}
           persons={responsiblePersons}
         />
+
+        <DelayReportsModal
+          isOpen={isDelayReportsModalOpen}
+          onClose={() => setIsDelayReportsModalOpen(false)}
+          projectId={isTaskPage ? String(task?.project_id || '') : String(params.id || '')}
+          taskId={isTaskPage ? String(task?.id || '') : undefined}
+        />
+
+        {isTaskPage && isAssigneeModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center">
+            <div
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+              onClick={() => !isSavingAssignees && setIsAssigneeModalOpen(false)}
+            />
+
+            <div className="relative z-10 w-full max-w-2xl rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900 dark:border dark:border-gray-700">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900 dark:text-white">Ответственные по задаче</h3>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Владелец может назначить участников задачи</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setIsAssigneeModalOpen(false)}
+                  disabled={isSavingAssignees}
+                  className="rounded-xl p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="mb-4 max-h-80 space-y-2 overflow-y-auto">
+                {projectMembers.map((member) => {
+                  const isSelected = assigneeSelection.includes(member.user.id);
+                  return (
+                    <button
+                      type="button"
+                      key={member.user.id}
+                      onClick={() => toggleAssignee(member.user.id)}
+                      className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${isSelected
+                        ? 'border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/20'
+                        : 'border-gray-200 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800'
+                        }`}
+                    >
+                      <div>
+                        <p className="font-semibold text-gray-900 dark:text-white">{getDisplayNameFromEmail(member.user.email)}</p>
+                        <p className="text-xs text-gray-500">{member.role}</p>
+                      </div>
+                      <div className={`h-5 w-5 rounded-full border-2 ${isSelected ? 'border-amber-500 bg-amber-500' : 'border-gray-300'}`} />
+                    </button>
+                  );
+                })}
+
+                {projectMembers.length === 0 && (
+                  <p className="text-sm text-gray-500">Нет участников проекта для назначения</p>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsAssigneeModalOpen(false)}
+                  disabled={isSavingAssignees}
+                  className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveTaskAssignees()}
+                  disabled={isSavingAssignees}
+                  className="rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
+                >
+                  {isSavingAssignees ? 'Сохраняем...' : 'Сохранить'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isCompleteConfirmOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setIsCompleteConfirmOpen(false)} />
+            <div className="relative z-10 w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900 dark:border dark:border-gray-700">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Завершить задачу?</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-5">
+                После подтверждения задача получит статус «Выполнено».
+              </p>
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsCompleteConfirmOpen(false)}
+                  className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setIsCompleteConfirmOpen(false);
+                    await updateTaskStatus('done');
+                  }}
+                  className="rounded-full bg-yellow-600 px-4 py-2 text-sm font-semibold text-white hover:bg-yellow-700"
+                >
+                  Подтвердить
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {isPostponeConfirmOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+            <div className="absolute inset-0 bg-black/40" onClick={() => setIsPostponeConfirmOpen(false)} />
+            <div className="relative z-10 w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900 dark:border dark:border-gray-700">
+              <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">Отложить задачу?</h3>
+              <p className="text-sm text-gray-600 dark:text-gray-300 mb-5">
+                После подтверждения задача получит статус «Отложено».
+              </p>
+              <div className="flex items-center justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={() => setIsPostponeConfirmOpen(false)}
+                  className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+                >
+                  Отмена
+                </button>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    setIsPostponeConfirmOpen(false);
+                    await updateTaskStatus('delayed');
+                  }}
+                  className="rounded-full bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700"
+                >
+                  Подтвердить
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   );

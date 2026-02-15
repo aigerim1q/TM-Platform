@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 
 import Header from '@/components/header';
 import { getHierarchy, type HierarchyNode } from '@/lib/users';
-import { cn } from '@/lib/utils';
+import { cn, getDisplayNameFromEmail } from '@/lib/utils';
 
 type StatusType = 'free' | 'busy' | 'sick';
 
@@ -28,7 +28,7 @@ function mapHierarchyNode(node: HierarchyNode, depth: number): Person {
 
   return {
     title: node.role || 'Сотрудник',
-    name: node.email,
+    name: getDisplayNameFromEmail(node.email),
     status: 'free',
     note: depth >= MAX_DEPTH && hasMore ? 'Глубина ограничена' : undefined,
     children,

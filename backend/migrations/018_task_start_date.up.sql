@@ -1,0 +1,2 @@
+ALTER TABLE stage_tasks
+    ADD COLUMN IF NOT EXISTS start_date TIMESTAMPTZ;

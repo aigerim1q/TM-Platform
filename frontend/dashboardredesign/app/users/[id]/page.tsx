@@ -5,6 +5,7 @@ import { getApiStatus } from "@/lib/api";
 
 import Header from "@/components/header";
 import { getUserManager, getUserProfile, getUserSubordinates, type UserPublic } from "@/lib/users";
+import { getDisplayNameFromEmail } from "@/lib/utils";
 
 export default function UserProfilePage({ params }: { params: { id: string } }) {
   const userId = params.id;
@@ -130,7 +131,7 @@ export default function UserProfilePage({ params }: { params: { id: string } }) 
                 <span className="font-medium">ID:</span> {user.id}
               </div>
               <div>
-                <span className="font-medium">Email:</span> {user.email}
+                <span className="font-medium">Имя:</span> {getDisplayNameFromEmail(user.email)}
               </div>
               <div>
                 <span className="font-medium">Role:</span> {user.role || "—"}
@@ -152,7 +153,7 @@ export default function UserProfilePage({ params }: { params: { id: string } }) 
                 )}
                 {!managerLoading && !managerError && manager && (
                   <span>
-                    {manager.email} ({manager.role || "—"})
+                    {getDisplayNameFromEmail(manager.email)} ({manager.role || "—"})
                   </span>
                 )}
               </div>
@@ -171,7 +172,7 @@ export default function UserProfilePage({ params }: { params: { id: string } }) 
                   <ul className="mt-2 space-y-1">
                     {subordinates.map((item) => (
                       <li key={item.id} className="flex items-center justify-between rounded-lg border border-white/20 bg-white/60 px-3 py-2 text-sm text-gray-700 shadow-sm dark:border-white/10 dark:bg-slate-900/50 dark:text-gray-200">
-                        <span>{item.email}</span>
+                        <span>{getDisplayNameFromEmail(item.email)}</span>
                         <span className="text-xs text-gray-500 dark:text-gray-400">
                           {item.role || "—"}
                         </span>
