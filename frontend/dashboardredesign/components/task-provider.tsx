@@ -1,20 +1,45 @@
 'use client';
 
-import React, { createContext, useContext, useState, ReactNode } from 'react';
+import React, { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
+import { api, getApiErrorMessage } from '@/lib/api';
 
 export interface Task {
     id: string;
     title: string;
     deadline?: string; // YYYY-MM-DD
+    status?: string;
     assignees?: string[];
     project?: string;
+    projectId?: string;
     stage?: string;
+    source?: 'project' | 'task';
     color?: string; // For calendar visualization
     type?: 'task' | 'milestone' | 'dot';
 }
 
+type ProjectEntity = {
+    id: string;
+    title?: string;
+    deadline?: string | null;
+};
+
+type StageEntity = {
+    id: string;
+    title?: string;
+};
+
+type StageTaskEntity = {
+    id: string;
+    title?: string;
+    deadline?: string | null;
+    status?: string | null;
+};
+
 interface TaskContextType {
     tasks: Task[];
+    isLoading: boolean;
+    error: string | null;
+    refresh: () => Promise<void>;
     addTask: (task: Task) => void;
     updateTask: (id: string, updates: Partial<Task>) => void;
     deleteTask: (id: string) => void;
@@ -23,19 +48,132 @@ interface TaskContextType {
 const TaskContext = createContext<TaskContextType | undefined>(undefined);
 
 export function TaskProvider({ children }: { children: ReactNode }) {
-    // Initial mock data to populate the calendar
-    const [tasks, setTasks] = useState<Task[]>([
-        { id: '1', title: 'ЖЦП: Старт Shyraq', deadline: '2025-10-02', color: 'bg-blue-100 text-blue-600', type: 'task' },
-        { id: '2', title: 'Тендер: Фасады', deadline: '2025-10-04', color: 'bg-[#fffaeb] text-amber-600 border border-amber-100', type: 'task' },
-        { id: '3', title: 'Бетон 4-й блок', deadline: '2025-10-08', color: 'bg-green-100 text-green-700', type: 'task' },
-        { id: '4', title: 'Смета Ansau', deadline: '2025-10-10', color: 'bg-red-500', type: 'dot' },
-        { id: '5', title: 'ЖЦП: Технадзор', deadline: '2025-10-15', color: 'bg-purple-100 text-purple-600', type: 'task' },
-        { id: '6', title: 'Отчет по эффективности', deadline: '2025-10-18', color: 'bg-[#fffaeb] text-amber-600 border border-amber-100', type: 'task' },
-        // Dots for default data
-        { id: '7', title: 'dot1', deadline: '2025-10-24', color: 'bg-blue-500', type: 'dot' },
-        { id: '8', title: 'dot2', deadline: '2025-10-24', color: 'bg-green-500', type: 'dot' },
-        { id: '9', title: 'dot3', deadline: '2025-10-24', color: 'bg-amber-500', type: 'dot' },
-    ]);
+    const [tasks, setTasks] = useState<Task[]>([]);
+    const [isLoading, setIsLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const normalizeDateOnly = (input?: string | null) => {
+        if (!input) return '';
+        const parsed = new Date(input);
+        if (Number.isNaN(parsed.getTime())) return '';
+        return parsed.toISOString().slice(0, 10);
+    };
+
+    const getTaskColorByStatus = (status?: string | null) => {
+        const normalized = String(status || '').trim().toLowerCase();
+
+        if (normalized === 'done' || normalized === 'completed') {
+            return 'bg-emerald-100 text-emerald-700';
+        }
+
+        if (normalized === 'delayed') {
+            return 'bg-rose-100 text-rose-700';
+        }
+
+        if (normalized === 'in_progress') {
+            return 'bg-blue-100 text-blue-700';
+        }
+
+        return 'bg-amber-100 text-amber-700';
+    };
+
+    const refresh = useCallback(async () => {
+        setIsLoading(true);
+        setError(null);
+
+        try {
+            const { data: projectsData } = await api.get<ProjectEntity[]>('/projects');
+            const projects = Array.isArray(projectsData) ? projectsData : [];
+
+            const projectDeadlineItems: Task[] = projects
+                .map((project) => {
+                    const deadline = normalizeDateOnly(project.deadline);
+                    if (!deadline) return null;
+
+                    return {
+                        id: `project-${project.id}`,
+                        title: `Проект: ${project.title || 'Без названия'}`,
+                        deadline,
+                        project: project.title || 'Без названия',
+                        projectId: project.id,
+                        source: 'project' as const,
+                        color: 'bg-amber-100 text-amber-700 border border-amber-200',
+                        type: 'milestone' as const,
+                    };
+                })
+                .filter((item): item is Task => Boolean(item));
+
+            const stagesByProject = await Promise.all(
+                projects.map(async (project) => {
+                    const { data: stagesData } = await api.get<StageEntity[]>(`/projects/${project.id}/stages`);
+                    return {
+                        project,
+                        stages: Array.isArray(stagesData) ? stagesData : [],
+                    };
+                }),
+            );
+
+            const taskDeadlineItemsNested = await Promise.all(
+                stagesByProject.map(async ({ project, stages }) => {
+                    const tasksByStage = await Promise.all(
+                        stages.map(async (stage) => {
+                            const { data: stageTasksData } = await api.get<StageTaskEntity[]>(`/stages/${stage.id}/tasks`);
+                            const stageTasks = Array.isArray(stageTasksData) ? stageTasksData : [];
+                            return stageTasks
+                                .map((stageTask) => {
+                                    const deadline = normalizeDateOnly(stageTask.deadline);
+                                    if (!deadline) return null;
+
+                                    return {
+                                        id: `task-${stageTask.id}`,
+                                        title: stageTask.title || 'Без названия задачи',
+                                        deadline,
+                                        status: stageTask.status || undefined,
+                                        project: project.title || 'Без названия',
+                                        projectId: project.id,
+                                        stage: stage.title || 'Этап',
+                                        source: 'task' as const,
+                                        color: getTaskColorByStatus(stageTask.status),
+                                        type: 'task' as const,
+                                    };
+                                })
+                                .filter((item): item is Task => Boolean(item));
+                        }),
+                    );
+
+                    return tasksByStage.flat();
+                }),
+            );
+
+            const taskDeadlineItems = taskDeadlineItemsNested.flat();
+
+            const combined = [...projectDeadlineItems, ...taskDeadlineItems].sort((a, b) => {
+                const aDate = new Date(a.deadline || '').getTime();
+                const bDate = new Date(b.deadline || '').getTime();
+                return aDate - bDate;
+            });
+
+            setTasks(combined);
+        } catch (e) {
+            setError(getApiErrorMessage(e, 'Не удалось загрузить дедлайны проектов и задач'));
+        } finally {
+            setIsLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        void refresh();
+
+        const intervalId = window.setInterval(() => {
+            if (!document.hidden) {
+                void refresh();
+            }
+        }, 60000);
+
+        return () => {
+            window.clearInterval(intervalId);
+        };
+    }, [refresh]);
 
     const addTask = (task: Task) => {
         setTasks(prev => [...prev, task]);
@@ -50,7 +188,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     };
 
     return (
-        <TaskContext.Provider value={{ tasks, addTask, updateTask, deleteTask }}>
+        <TaskContext.Provider value={{ tasks, isLoading, error, refresh, addTask, updateTask, deleteTask }}>
             {children}
         </TaskContext.Provider>
     );

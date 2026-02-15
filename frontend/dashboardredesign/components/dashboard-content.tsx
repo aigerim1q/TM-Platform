@@ -1,9 +1,61 @@
 'use client';
 
-import React from "react"
-import { useState } from 'react';
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from 'next/navigation';
-import { Clock, Plus, X, Users, UserPlus, ChevronDown, ChevronRight } from 'lucide-react';
+import { Clock, Plus, X, Users, UserPlus, ChevronDown, Trash2 } from 'lucide-react';
+import { api, getApiErrorMessage, getCurrentUserId } from '@/lib/api';
+import { getFileUrl } from '@/lib/utils';
+import { unpackTaskBlocks } from '@/components/editor/taskBlockMeta';
+
+type ProjectAPI = {
+  id: string;
+  title: string;
+  current_user_role?: 'owner' | 'manager' | 'member';
+  currentUserRole?: 'owner' | 'manager' | 'member';
+  coverUrl?: string | null;
+  cover_url?: string | null;
+  budget?: number | null;
+  total_budget?: number | null;
+  deadline?: string | null;
+  end_date?: string | null;
+};
+
+type StageAPI = {
+  id: string;
+  title: string;
+};
+
+type TaskAPI = {
+  id: string;
+  title: string;
+  deadline?: string | null;
+  status?: string;
+  blocks?: unknown;
+};
+
+type SubordinateUser = {
+  id: string;
+  email: string;
+};
+
+type DashboardProject = {
+  id: string;
+  title: string;
+  coverUrl: string;
+  budget: number;
+  deadline: string | null;
+};
+
+type DashboardTaskCard = {
+  id: string;
+  project: string;
+  time: string;
+  timeStatus: 'danger' | 'warning' | 'success';
+  title: string;
+  description: string;
+  responsible?: string;
+  deadline?: string | null;
+};
 
 interface TaskCardProps {
   id: string;
@@ -55,36 +107,103 @@ function TaskCard({ project, time, timeStatus, title, description, onClick }: Ta
 
 interface ProjectCardProps {
   id: string;
-  name: string;
-  days: string;
-  image: string;
+  title: string;
+  coverUrl: string;
+  budget: number;
+  deadline: string | null;
   onClick?: () => void;
+  onDelete?: (projectId: string, title: string) => void;
 }
 
-function ProjectCard({ id, name, days, image, onClick }: ProjectCardProps) {
+function formatBudget(budget: number) {
+  if (!Number.isFinite(budget)) {
+    return '—';
+  }
+
+  return new Intl.NumberFormat('ru-RU').format(budget);
+}
+
+function formatDeadline(deadline: string | null) {
+  if (!deadline) {
+    return 'Без дедлайна';
+  }
+
+  const parsed = new Date(deadline);
+  if (Number.isNaN(parsed.getTime())) {
+    return deadline;
+  }
+
+  return parsed.toLocaleDateString('ru-RU', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+}
+
+function isDeadlineOverdue(deadline: string | null) {
+  if (!deadline) {
+    return false;
+  }
+
+  const parsed = new Date(deadline);
+  if (Number.isNaN(parsed.getTime())) {
+    return false;
+  }
+
+  return parsed.getTime() < Date.now();
+}
+
+function isTaskCompletedStatus(status?: string) {
+  const normalized = String(status || '').toLowerCase();
+  return normalized === 'done' || normalized === 'completed';
+}
+
+function ProjectCard({ id, title, coverUrl, budget, deadline, onClick, onDelete }: ProjectCardProps) {
+  const imageSrc = getFileUrl(coverUrl) || "/placeholder.svg";
+
   return (
     <div
+      data-project-id={id}
       onClick={onClick}
-      className="relative rounded-[2.5rem] overflow-hidden aspect-[16/10] cursor-pointer hover:shadow-2xl transition-all duration-300 group"
+      className="bg-[#FBF9F7] dark:bg-card rounded-[2.5rem] overflow-hidden border-2 border-[#E2E2E2] dark:border-white/5 cursor-pointer hover:shadow-2xl transition-all duration-300 group"
     >
-      <img
-        src={image || "/placeholder.svg"}
-        alt={name}
-        className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
-      />
+      <div className="relative aspect-16/10 overflow-hidden">
+        {onDelete && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(id, title);
+            }}
+            className="absolute right-3 top-3 z-10 inline-flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur hover:bg-red-600 transition-colors"
+            title="Удалить проект"
+            aria-label="Удалить проект"
+          >
+            <Trash2 size={14} />
+          </button>
+        )}
+        <img
+          src={imageSrc}
+          alt={title}
+          className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-110"
+        />
+      </div>
 
-      {/* Top Glassmorphism Bar */}
-      <div className="absolute top-0 left-0 right-0 p-4">
-        <div className="flex items-center justify-between px-6 py-3 rounded-full bg-black/30 backdrop-blur-md border border-white/10 shadow-lg">
-          <span className="text-white font-bold text-lg tracking-tight">Проект: {name}</span>
+      <div className="p-6">
+        <h3 className="text-[18px] font-bold text-gray-900 dark:text-gray-100 tracking-tight mb-3 line-clamp-1">
+          {title}
+        </h3>
 
-          <div className="flex items-center gap-2 bg-black/60 rounded-full px-4 py-1.5 border border-white/5">
-            <Clock size={16} className="text-white/80" />
-            <span className="text-sm font-medium text-white">{days}</span>
-            <div className="relative flex items-center justify-center ml-1">
-              <span className={`h-3 w-3 rounded-full ${name === 'Shyraq' ? 'bg-yellow-400' : 'bg-green-500'} relative z-10`} />
-              <span className={`absolute inset-0 h-3 w-3 rounded-full ${name === 'Shyraq' ? 'bg-yellow-400 animate-pulse blur-[4px]' : 'bg-green-500 animate-pulse blur-[4px]'}`} />
-            </div>
+        <div className="flex flex-col gap-2 text-sm text-gray-600 dark:text-gray-300">
+          <div className="flex items-center justify-between">
+            <span className="font-medium">Бюджет</span>
+            <span className="font-bold text-gray-900 dark:text-gray-100">{formatBudget(budget)}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="font-medium">Дедлайн</span>
+            <span className={`font-bold ${isDeadlineOverdue(deadline) ? 'text-red-600 dark:text-red-400' : 'text-gray-900 dark:text-gray-100'}`}>
+              {formatDeadline(deadline)}
+            </span>
           </div>
         </div>
       </div>
@@ -173,7 +292,7 @@ function ResponsibleModal({ isOpen, onClose }: ResponsibleModalProps) {
           <div className="flex items-center gap-3">
             <button className="flex items-center gap-1 text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-200">
               <UserPlus size={18} />
-              <span className="text-sm">Делегировать</span>
+              <span className="text-sm">Назначить менеджера</span>
             </button>
             <button
               onClick={onClose}
@@ -236,7 +355,7 @@ function ResponsibleModal({ isOpen, onClose }: ResponsibleModalProps) {
         {/* Add Button */}
         <button className="w-full flex items-center justify-center gap-2 bg-amber-200 hover:bg-amber-300 dark:bg-amber-600 dark:hover:bg-amber-500 text-amber-900 dark:text-white font-semibold py-3 rounded-xl transition-colors">
           <UserPlus size={20} />
-          Добавить ответственных
+          Добавить участников
         </button>
       </div>
     </div>
@@ -246,113 +365,220 @@ function ResponsibleModal({ isOpen, onClose }: ResponsibleModalProps) {
 export default function DashboardContent() {
   const router = useRouter();
   const [isResponsibleModalOpen, setIsResponsibleModalOpen] = useState(false);
-  const [myTasks, setMyTasks] = useState([
-    {
-      id: 'task-1',
-      project: 'Shyraq',
-      time: '-9 часов',
-      timeStatus: 'danger' as const,
-      title: 'Возведение колонн на 1 э...',
-      description: 'Интерьеры подъездов и этажей Перед началом работ нужно провести подготовку...',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-    {
-      id: 'task-2',
-      project: 'Ansau',
-      time: '2 дня',
-      timeStatus: 'success' as const,
-      title: 'Нужно сделать новую пла...',
-      description: 'На объекте Ansau срочно требуется новая планировку 5-го этажа, чтобы совпадала с новым ....',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-    {
-      id: 'task-3',
-      project: 'Dariya',
-      time: '20 дней',
-      timeStatus: 'success' as const,
-      title: 'Нужно сделать новую пла...',
-      description: 'На объекте Dariya срочно требуется новая планировку 5-го этажа, чтобы совпадала с новым ....',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-  ]);
-
-  const urgentTasks = [
-    {
-      id: 'urgent-1',
-      project: 'Shyraq',
-      time: '18 часов',
-      timeStatus: 'success' as const,
-      title: 'Нужно привезти 10 плиток',
-      description: 'На объекте Shyraq срочно требуется новая плитка, 5x3 метра, 2 штуки для наличников вокруг л....',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-  ];
-
-  const projects = [
-    {
-      id: 'shyraq',
-      name: 'Shyraq',
-      days: '25 дней',
-      image: 'https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?q=80&w=1000&auto=format&fit=crop',
-    },
-    {
-      id: 'ansau',
-      name: 'Ansau',
-      days: '55 дней',
-      image: 'https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?q=80&w=1000&auto=format&fit=crop',
-    },
-    {
-      id: 'dariya',
-      name: 'Dariya',
-      days: '55 дней',
-      image: 'https://images.unsplash.com/photo-1512917774080-9991f1c4c750?q=80&w=1000&auto=format&fit=crop',
-    },
-  ];
-
-  const subordinateTasks = [
-    {
-      id: 'sub-task-1',
-      project: 'Shyraq',
-      time: '-9 часов',
-      timeStatus: 'danger' as const,
-      title: 'Нужно сделать новую пла...',
-      description: 'На объекте Shyraq срочно требуется новая планировку 5-го этажа, чтобы совпадала с новым ....',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-    {
-      id: 'sub-task-2',
-      project: 'Ansau',
-      time: '2 дня',
-      timeStatus: 'success' as const,
-      title: 'Нужно сделать новую пла...',
-      description: 'На объекте Ansau срочно требуется новая планировку 5-го этажа, чтобы совпадала с новым ....',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-    {
-      id: 'sub-task-3',
-      project: 'Dariya',
-      time: '20 дней',
-      timeStatus: 'success' as const,
-      title: 'Нужно сделать новую пла...',
-      description: 'На объекте Dariya срочно требуется новая планировку 5-го этажа, чтобы совпадала с новым ....',
-      responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
-    },
-  ];
+  const [projects, setProjects] = useState<DashboardProject[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+  const [projectsError, setProjectsError] = useState<string | null>(null);
+  const [isDeletingProject, setIsDeletingProject] = useState(false);
+  const [deleteProjectConfirm, setDeleteProjectConfirm] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [myTasks, setMyTasks] = useState<Array<{
+    id: string;
+    project: string;
+    time: string;
+    timeStatus: 'danger' | 'warning' | 'success';
+    title: string;
+    description: string;
+    responsible?: string;
+    deadline?: string | null;
+  }>>([]);
+  const [subordinateTasks, setSubordinateTasks] = useState<DashboardTaskCard[]>([]);
 
   // Task creation moved to dedicated page at /tasks/new
 
+  const getTaskTimeBadge = (deadline?: string | null) => {
+    if (!deadline) {
+      return { time: 'без срока', timeStatus: 'warning' as const };
+    }
+
+    const parsed = new Date(deadline);
+    if (Number.isNaN(parsed.getTime())) {
+      return { time: 'без срока', timeStatus: 'warning' as const };
+    }
+
+    const diffMs = parsed.getTime() - Date.now();
+    const diffHours = Math.round(diffMs / (1000 * 60 * 60));
+    if (diffHours < 0) {
+      return { time: `${diffHours} часов`, timeStatus: 'danger' as const };
+    }
+
+    if (diffHours < 24) {
+      return { time: `${diffHours} часов`, timeStatus: 'warning' as const };
+    }
+
+    const diffDays = Math.round(diffHours / 24);
+    return { time: `${diffDays} дней`, timeStatus: 'success' as const };
+  };
+
+  const isUrgentTask = (deadline?: string | null) => {
+    if (!deadline) {
+      return false;
+    }
+
+    const parsed = new Date(deadline);
+    if (Number.isNaN(parsed.getTime())) {
+      return false;
+    }
+
+    const diffMs = parsed.getTime() - Date.now();
+    const fiveDaysMs = 5 * 24 * 60 * 60 * 1000;
+    return diffMs <= fiveDaysMs;
+  };
+
+  const urgentTasks = useMemo(() => myTasks.filter((task) => isUrgentTask(task.deadline)), [myTasks]);
+  const regularMyTasks = useMemo(() => myTasks.filter((task) => !isUrgentTask(task.deadline)), [myTasks]);
+
   const handleTaskClick = (taskId: string) => {
-    router.push(`/project/${taskId}`);
+    const normalizedTaskId = String(taskId || '').trim().replace(/^task-/, '');
+    if (!normalizedTaskId) {
+      return;
+    }
+    router.push(`/project/task-${normalizedTaskId}`);
   };
 
   const handleProjectClick = (projectId: string) => {
     router.push(`/project-overview/${projectId}`);
   };
 
+  const handleCreateProject = async () => {
+    setProjectsError(null);
+
+    try {
+      const { data } = await api.post<{ id: string }>('/projects', {
+        title: 'Новый проект',
+        budget: 0,
+      });
+
+      if (!data?.id) {
+        throw new Error('project id is missing');
+      }
+
+      router.push(`/projects/${data.id}/editor`);
+    } catch (error) {
+      setProjectsError(getApiErrorMessage(error, 'Не удалось создать проект'));
+    }
+  };
+
   const handleResponsibleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     setIsResponsibleModalOpen(true);
   };
+
+  const handleOpenDeleteProjectModal = (id: string, title: string) => {
+    setDeleteProjectConfirm({ id, title });
+  };
+
+  const handleConfirmDeleteProject = async () => {
+    if (!deleteProjectConfirm || isDeletingProject) {
+      return;
+    }
+
+    setProjectsError(null);
+    setIsDeletingProject(true);
+    try {
+      await api.delete(`/projects/${deleteProjectConfirm.id}`);
+      setProjects((prev) => prev.filter((project) => project.id !== deleteProjectConfirm.id));
+      setDeleteProjectConfirm(null);
+    } catch (error) {
+      setProjectsError(getApiErrorMessage(error, 'Не удалось удалить проект'));
+    } finally {
+      setIsDeletingProject(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadProjects = async () => {
+      setProjectsLoading(true);
+      setProjectsError(null);
+
+      try {
+        const { data } = await api.get<ProjectAPI[]>('/projects');
+        if (cancelled) {
+          return;
+        }
+
+        const mapped = (Array.isArray(data) ? data : []).map((project) => ({
+          id: project.id,
+          title: project.title,
+          coverUrl: project.coverUrl || project.cover_url || '',
+          budget: Number(project.budget ?? project.total_budget ?? 0),
+          deadline: project.deadline || project.end_date || null,
+        }));
+        setProjects(mapped);
+
+        const projectsList = Array.isArray(data) ? data : [];
+        const taskCards: DashboardTaskCard[] = [];
+        const subordinateTaskCards: DashboardTaskCard[] = [];
+
+        const currentUserId = getCurrentUserId();
+        let subordinateIds = new Set<string>();
+        if (currentUserId) {
+          const { data: subordinateUsers } = await api.get<SubordinateUser[]>(`/users/${currentUserId}/subordinates`);
+          subordinateIds = new Set((Array.isArray(subordinateUsers) ? subordinateUsers : []).map((user) => user.id));
+        }
+
+        for (const project of projectsList) {
+          const { data: stagesData } = await api.get<StageAPI[]>(`/projects/${project.id}/stages`);
+          const stages = Array.isArray(stagesData) ? stagesData : [];
+
+          for (const stage of stages) {
+            const { data: tasksData } = await api.get<TaskAPI[]>(`/stages/${stage.id}/tasks`);
+            const tasks = Array.isArray(tasksData) ? tasksData : [];
+
+            tasks.forEach((task) => {
+              if (isTaskCompletedStatus(task.status)) {
+                return;
+              }
+
+              const badge = getTaskTimeBadge(task.deadline);
+              const taskCard = {
+                id: task.id,
+                project: project.title,
+                time: badge.time,
+                timeStatus: badge.timeStatus,
+                title: task.title || 'Новая задача',
+                description: `Этап: ${stage.title}`,
+                deadline: task.deadline || null,
+              };
+
+              taskCards.push(taskCard);
+
+              if (subordinateIds.size > 0) {
+                const assignees = unpackTaskBlocks(task.blocks).assignees;
+                const hasSubordinateAssignee = assignees.some((id) => subordinateIds.has(id));
+                if (hasSubordinateAssignee) {
+                  subordinateTaskCards.push(taskCard);
+                }
+              }
+            });
+          }
+        }
+
+        setMyTasks(taskCards.slice(0, 30));
+        setSubordinateTasks(subordinateTaskCards.slice(0, 30));
+      } catch (error) {
+        if (!cancelled) {
+          setProjects([]);
+          setMyTasks([]);
+          setSubordinateTasks([]);
+          setProjectsError(getApiErrorMessage(error, 'Не удалось загрузить проекты'));
+        }
+      } finally {
+        if (!cancelled) {
+          setProjectsLoading(false);
+        }
+      }
+    };
+
+    void loadProjects();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <main className="w-full max-w-7xl mx-auto px-4 md:px-6 py-8">
@@ -364,53 +590,103 @@ export default function DashboardContent() {
         onClose={() => setIsResponsibleModalOpen(false)}
       />
 
+      {deleteProjectConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900 dark:border dark:border-gray-700">
+            <h3 className="text-lg font-bold text-gray-900 dark:text-white mb-2">
+              Удалить проект?
+            </h3>
+            <p className="text-sm text-gray-600 dark:text-gray-300 mb-5 leading-relaxed">
+              Проект «{deleteProjectConfirm.title}» будет удалён без возможности восстановления.
+            </p>
+
+            <div className="flex items-center justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setDeleteProjectConfirm(null)}
+                disabled={isDeletingProject}
+                className="rounded-full border border-gray-300 px-5 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-600 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmDeleteProject()}
+                disabled={isDeletingProject}
+                className="rounded-full bg-red-600 px-5 py-2 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                {isDeletingProject ? 'Удаление...' : 'Удалить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Urgent Tasks Section */}
       <div className="mb-8">
-        <SectionHeader color="green" title="Срочные задачи" count={1} />
-        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {urgentTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              {...task}
-              onClick={() => handleTaskClick(task.id)}
-              onResponsibleClick={handleResponsibleClick}
-            />
-          ))}
+        <SectionHeader color="green" title="Срочные задачи" count={urgentTasks.length} />
+        <div className="mt-4 overflow-x-auto pb-2">
+          <div className="flex gap-4 min-w-max">
+            {urgentTasks.map((task) => (
+              <div key={task.id} className="w-96 shrink-0">
+                <TaskCard
+                  {...task}
+                  onClick={() => handleTaskClick(task.id)}
+                  onResponsibleClick={handleResponsibleClick}
+                />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* My Tasks Section */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
-          <SectionHeader color="red" title="Мои задачи" count={10} />
+          <SectionHeader color="red" title="Мои задачи" count={regularMyTasks.length} />
           <AddButton text="Добавить задачу" onClick={() => router.push('/tasks/new')} />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {myTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              {...task}
-              onClick={() => handleTaskClick(task.id)}
-              onResponsibleClick={handleResponsibleClick}
-            />
-          ))}
+        <div className="overflow-x-auto pb-2">
+          <div className="flex gap-4 min-w-max">
+            {regularMyTasks.map((task) => (
+              <div key={task.id} className="w-96 shrink-0">
+                <TaskCard
+                  {...task}
+                  onClick={() => handleTaskClick(task.id)}
+                  onResponsibleClick={handleResponsibleClick}
+                />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
       {/* Projects Section */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
-          <SectionHeader color="yellow" title="Проекты" count={3} />
-          <AddButton text="Добавить проект" />
+          <SectionHeader color="yellow" title="Проекты" count={projects.length} />
+          <AddButton text="Добавить проект" onClick={handleCreateProject} />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {projectsError && (
+          <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/40 dark:bg-red-950/20 dark:text-red-300">
+            {projectsError}
+          </div>
+        )}
+        {projectsLoading && (
+          <div className="mb-4 text-sm text-gray-500 dark:text-gray-400">Загрузка проектов...</div>
+        )}
+        <div className="overflow-x-auto pb-2">
+          <div className="flex gap-4 min-w-max">
           {projects.map((project) => (
-            <ProjectCard
-              key={project.id}
-              {...project}
-              onClick={() => handleProjectClick(project.id)}
-            />
+              <div key={project.id} className="w-96 shrink-0">
+                <ProjectCard
+                  {...project}
+                  onClick={() => handleProjectClick(project.id)}
+                  onDelete={handleOpenDeleteProjectModal}
+                />
+              </div>
           ))}
+          </div>
         </div>
       </div>
 
@@ -418,34 +694,46 @@ export default function DashboardContent() {
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
           <SectionHeader color="red" title="Задачи подчинённых" count={subordinateTasks.length} />
-          <AddButton text="Добавить проект" />
+          <AddButton text="Добавить проект" onClick={handleCreateProject} />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="overflow-x-auto pb-2">
+          <div className="flex gap-4 min-w-max">
           {subordinateTasks.map((task) => (
-            <TaskCard
-              key={task.id}
-              {...task}
-              onClick={() => handleTaskClick(task.id)}
-              onResponsibleClick={handleResponsibleClick}
-            />
+              <div key={task.id} className="w-96 shrink-0">
+                <TaskCard
+                  {...task}
+                  onClick={() => handleTaskClick(task.id)}
+                  onResponsibleClick={handleResponsibleClick}
+                />
+              </div>
           ))}
+          </div>
         </div>
+        {subordinateTasks.length === 0 && (
+          <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+            Нет активных задач, назначенных подчинённым.
+          </p>
+        )}
       </div>
 
       {/* Subordinate Projects Section */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
-          <SectionHeader color="yellow" title="Проекты подчиненных" count={3} />
-          <AddButton text="Добавить проект" />
+          <SectionHeader color="yellow" title="Проекты подчиненных" count={projects.length} />
+          <AddButton text="Добавить проект" onClick={handleCreateProject} />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div className="overflow-x-auto pb-2">
+          <div className="flex gap-4 min-w-max">
           {projects.map((project) => (
-            <ProjectCard
-              key={project.id}
-              {...project}
-              onClick={() => handleProjectClick(project.id)}
-            />
+              <div key={project.id} className="w-96 shrink-0">
+                <ProjectCard
+                  {...project}
+                  onClick={() => handleProjectClick(project.id)}
+                  onDelete={handleOpenDeleteProjectModal}
+                />
+              </div>
           ))}
+          </div>
         </div>
       </div>
     </main>

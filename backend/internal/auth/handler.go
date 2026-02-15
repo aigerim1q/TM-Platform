@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -93,6 +94,11 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.repo.CreateUser(r.Context(), req.Email, string(hash))
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "email already registered"})
+			return
+		}
 		log.Printf("register: create user error: %v", err)
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to create user"})
 		return
@@ -363,6 +369,27 @@ func (h *Handler) GetHierarchy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, roots)
+}
+
+func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := h.repo.ListUsers(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load users"})
+		return
+	}
+
+	resp := make([]userResponse, 0, len(users))
+	for _, user := range users {
+		resp = append(resp, userResponse{
+			ID:        user.ID,
+			Email:     user.Email,
+			Role:      user.Role,
+			ManagerID: user.ManagerID,
+			CreatedAt: user.CreatedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

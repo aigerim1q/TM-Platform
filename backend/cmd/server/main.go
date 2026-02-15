@@ -7,7 +7,9 @@ import (
 	"tm-platform-backend/internal/auth"
 	"tm-platform-backend/internal/config"
 	"tm-platform-backend/internal/db"
+	"tm-platform-backend/internal/handlers"
 	"tm-platform-backend/internal/httpapi"
+	"tm-platform-backend/internal/projectfiles"
 	"tm-platform-backend/internal/projects"
 )
 
@@ -25,13 +27,24 @@ func main() {
 	authHandler := auth.NewHandler(authRepo, authSvc)
 
 	projectsRepo := projects.NewRepository(dbConn)
-	projectsHandler := projects.NewHandler(projectsRepo)
+	projectsHandler := projects.NewHTTPHandler(projectsRepo)
 
-	router := httpapi.NewRouter(authHandler, projectsHandler, authSvc)
+	uploadHandler, err := handlers.NewUploadHandler("uploads")
+	if err != nil {
+		log.Fatalf("upload handler init failed: %v", err)
+	}
+
+	projectFilesRepo := projectfiles.NewRepository(dbConn)
+	projectFilesHandler := projectfiles.NewHandler(projectFilesRepo)
+
+	router := httpapi.NewRouter(authHandler, projectsHandler, uploadHandler, projectFilesHandler, authSvc)
+	mux := http.NewServeMux()
+	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
+	mux.Handle("/", router)
 
 	server := &http.Server{
 		Addr:    cfg.ServerAddr,
-		Handler: router,
+		Handler: mux,
 	}
 
 	log.Printf("server started on %s", cfg.ServerAddr)

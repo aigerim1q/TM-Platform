@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ChevronLeft, ChevronRight, Plus, Calculator, Briefcase } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import {
@@ -17,17 +17,17 @@ import {
     isWeekend,
     addWeeks,
     subWeeks,
-    parseISO
+    parseISO,
+    differenceInCalendarDays
 } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { useTaskContext } from './task-provider';
 
 export default function CalendarContent() {
     const router = useRouter();
-    const { tasks } = useTaskContext();
+    const { tasks, isLoading, error } = useTaskContext();
 
-    // Start Date: October 2025 as requested
-    const [currentDate, setCurrentDate] = useState(new Date(2025, 9, 1)); // Month is 0-indexed: 9 = October
+    const [currentDate, setCurrentDate] = useState(new Date());
     const [view, setView] = useState<'month' | 'week'>('month');
 
     // Navigation Handlers
@@ -78,29 +78,42 @@ export default function CalendarContent() {
         });
     };
 
-    // Mock upcoming for sidebar (static for now, can be dynamic later)
-    const upcomingDeadlines = [
-        {
-            project: 'SHYRAQ',
-            stage: 'Проектирование',
-            title: 'Финальное согласование КЖ блоков 1-3',
-            due: 'Завтра, 10:00',
-            assignee: 'А. Смагулов',
-            icon: 'S',
-            iconColor: 'bg-blue-100 text-blue-600',
-            isHot: true
-        },
-        {
-            project: 'DARIYA',
-            stage: 'Закупки',
-            title: 'Оплата счета за лифтовое оборудование',
-            due: '11 Октября',
-            assignee: 'Финотдел',
-            icon: 'D',
-            iconColor: 'bg-amber-100 text-amber-600',
-            isHot: false
-        }
-    ];
+    const upcomingDeadlines = useMemo(() => {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        return tasks
+            .filter((item) => item.deadline)
+            .map((item) => ({
+                ...item,
+                parsedDate: parseISO(item.deadline as string),
+            }))
+            .filter((item) => !Number.isNaN(item.parsedDate.getTime()) && item.parsedDate >= today)
+            .sort((a, b) => a.parsedDate.getTime() - b.parsedDate.getTime())
+            .slice(0, 6)
+            .map((item) => {
+                const dayDiff = differenceInCalendarDays(item.parsedDate, today);
+                const due = dayDiff === 0
+                    ? 'Сегодня'
+                    : dayDiff === 1
+                        ? 'Завтра'
+                        : format(item.parsedDate, 'd MMMM', { locale: ru });
+
+                return {
+                    id: item.id,
+                    project: item.project || 'Проект',
+                    stage: item.stage || (item.source === 'project' ? 'Дедлайн проекта' : 'Дедлайн задачи'),
+                    title: item.title,
+                    due,
+                    iconColor: item.source === 'project'
+                        ? 'bg-amber-100 text-amber-600'
+                        : 'bg-blue-100 text-blue-600',
+                    isHot: dayDiff <= 1,
+                    source: item.source,
+                    projectId: item.projectId,
+                };
+            });
+    }, [tasks]);
 
     const categories = [
         { label: 'Этапы ЖЦП', color: 'bg-blue-500' },
@@ -112,6 +125,12 @@ export default function CalendarContent() {
 
     return (
         <div className="max-w-[1600px] mx-auto space-y-8 pb-10">
+
+            {error && (
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/40 dark:bg-red-950/20 dark:text-red-300">
+                    {error}
+                </div>
+            )}
 
             {/* Top Controls */}
             <div className="flex flex-col lg:flex-row items-center justify-between gap-6 px-4 md:px-0">
@@ -147,6 +166,10 @@ export default function CalendarContent() {
             {/* Calendar Grid */}
             <div className="bg-white dark:bg-gray-800 rounded-[32px] shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden p-2 mx-4 md:mx-0 overflow-x-auto">
                 <div className="min-w-[800px]"> {/* Ensure minimum width for scrolling on mobile */}
+                    {isLoading && (
+                        <div className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400">Загрузка дедлайнов...</div>
+                    )}
+
                     {/* Header Row */}
                     <div className="grid grid-cols-7 mb-2 border-b border-gray-200 dark:border-gray-700 pb-2">
                         {['ПН', 'ВТ', 'СР', 'ЧТ', 'ПТ', 'СБ', 'ВС'].map((day, i) => (
@@ -191,9 +214,23 @@ export default function CalendarContent() {
                                                     <span className="text-[11px] font-medium text-gray-400 dark:text-gray-500 truncate">{task.title}</span>
                                                 </div>
                                             ) : (
-                                                <div key={task.id} className={`text-[11px] font-semibold px-3 py-2 rounded-xl truncate w-full ${task.color || 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300'}`}>
+                                                <button
+                                                    type="button"
+                                                    key={task.id}
+                                                    onClick={() => {
+                                                        if (task.source === 'project' && task.projectId) {
+                                                            router.push(`/project-overview/${task.projectId}`);
+                                                            return;
+                                                        }
+                                                        if (task.id.startsWith('task-')) {
+                                                            const taskId = task.id.slice(5);
+                                                            router.push(`/project/task-${taskId}`);
+                                                        }
+                                                    }}
+                                                    className={`text-[11px] text-left font-semibold px-3 py-2 rounded-xl truncate w-full ${task.color || 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-300'}`}
+                                                >
                                                     {task.title}
-                                                </div>
+                                                </button>
                                             )
                                         ))}
                                     </div>
@@ -216,7 +253,7 @@ export default function CalendarContent() {
                                 <div key={i} className="bg-white dark:bg-gray-800 rounded-[24px] p-6 border border-gray-100 dark:border-gray-700 flex flex-col sm:flex-row items-start sm:items-center justify-between shadow-sm hover:shadow-md transition-all group gap-4">
                                     <div className="flex items-center gap-5">
                                         <div className={`w-14 h-14 rounded-full flex items-center justify-center font-bold text-xl ${item.iconColor} group-hover:scale-105 transition-transform shrink-0`}>
-                                            {item.project === 'SHYRAQ' ? <Calculator size={24} /> : <Briefcase size={24} />}
+                                            {item.source === 'project' ? <Briefcase size={24} /> : <Calculator size={24} />}
                                         </div>
                                         <div>
                                             <div className="flex items-center gap-3 mb-1.5">
@@ -229,10 +266,16 @@ export default function CalendarContent() {
 
                                     <div className="text-left sm:text-right w-full sm:w-auto pl-[76px] sm:pl-0">
                                         <div className={`font-bold text-lg ${item.isHot ? 'text-red-500 dark:text-red-400' : 'text-gray-900 dark:text-white'}`}>{item.due}</div>
-                                        <div className="text-xs text-gray-400 font-medium mt-1">Ответственный: {item.assignee}</div>
+                                        <div className="text-xs text-gray-400 font-medium mt-1">{item.source === 'project' ? 'Проект' : 'Задача'}</div>
                                     </div>
                                 </div>
                             ))}
+
+                            {upcomingDeadlines.length === 0 && (
+                                <div className="rounded-2xl border border-dashed border-gray-300 px-4 py-6 text-sm text-gray-500 dark:border-gray-700 dark:text-gray-400">
+                                    Нет ближайших дедлайнов проектов и задач.
+                                </div>
+                            )}
                         </div>
                     </div>
 
