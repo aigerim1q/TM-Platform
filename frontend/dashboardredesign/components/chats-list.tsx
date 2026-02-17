@@ -1,114 +1,62 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Search, Settings, Plus } from 'lucide-react';
 
-interface Chat {
-  id: number;
-  name: string;
-  lastMessage: string;
-  time: string;
-  avatar: string;
-  isProject: boolean;
-  online?: boolean;
-}
+import type { ChatThread } from '@/lib/chats';
+import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
 
 interface ChatsListProps {
-  selectedChatId?: number;
-  onSelectChat?: (chatId: number) => void;
+  threads: ChatThread[];
+  selectedChatId?: string;
+  onSelectChat?: (chatId: string) => void;
   className?: string;
+  loading?: boolean;
 }
 
-export const chatsData: Chat[] = [
-  {
-    id: 1,
-    name: 'Проект Shyraq',
-    lastMessage: 'Алексей: Плитка доставлена на об...',
-    time: '12:30',
-    avatar: 'https://images.unsplash.com/photo-1545324418-cc1a3fa10c00?q=80&w=1000&auto=format&fit=crop',
-    isProject: true,
-    online: true,
-  },
-  {
-    id: 2,
-    name: 'Мария (HR)',
-    lastMessage: 'Документы на подпись готовы,...',
-    time: 'Вчера',
-    avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100&h=100&fit=crop',
-    isProject: false,
-  },
-  {
-    id: 3,
-    name: 'Дизайн отдел',
-    lastMessage: 'Новые макеты загружены в папку',
-    time: 'Вт',
-    avatar: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=100&h=100&fit=crop',
-    isProject: false,
-  },
-  {
-    id: 4,
-    name: 'Ербол (Прораб)',
-    lastMessage: 'Нужно согласовать смету по элек...',
-    time: 'Пн',
-    avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop',
-    isProject: false,
-    online: true,
-  },
-  {
-    id: 5,
-    name: 'Ляззат Нуркеева',
-    lastMessage: 'Привет, ты видел отчет за прошлый...',
-    time: '10.01',
-    avatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=100&h=100&fit=crop',
-    isProject: false,
-  },
-  {
-    id: 6,
-    name: 'Марат Алиев',
-    lastMessage: 'Напоминаю, что по плану на эту не...',
-    time: '09.01',
-    avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&h=100&fit=crop',
-    isProject: false,
-  },
-  {
-    id: 7,
-    name: 'Тимур Азимов',
-    lastMessage: 'Прошу до конца дня проверить ста...',
-    time: '05.01',
-    avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100&h=100&fit=crop',
-    isProject: false,
-  },
-];
+function formatThreadTime(value?: string | null) {
+  if (!value) return '';
 
-export default function ChatsList({ selectedChatId, onSelectChat, className = '' }: ChatsListProps) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+
+  const now = Date.now();
+  const diff = now - date.getTime();
+  const day = 24 * 60 * 60 * 1000;
+
+  if (diff < day) {
+    return date.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  }
+
+  return date.toLocaleDateString('ru-RU', { day: '2-digit', month: '2-digit' });
+}
+
+function threadDisplayName(thread: ChatThread) {
+  if (thread.is_group) return thread.name;
+  if (thread.partner_full_name) return thread.partner_full_name;
+  return getDisplayNameFromEmail(thread.partner_email || thread.name);
+}
+
+export default function ChatsList({ threads, selectedChatId, onSelectChat, className = '', loading = false }: ChatsListProps) {
   const router = useRouter();
   const [searchQuery, setSearchQuery] = useState('');
-  const [displayChats, setDisplayChats] = useState<Chat[]>(chatsData);
 
-  useEffect(() => {
-    // Load custom chats from localStorage to simulate persistence
-    const loadChats = () => {
-      const customChats = JSON.parse(localStorage.getItem('custom_chats') || '[]');
-      // Filter out duplicates if any
-      const uniqueInitial = chatsData.filter(c => !customChats.some((cc: Chat) => cc.id === c.id));
-      setDisplayChats([...customChats, ...uniqueInitial]);
-    };
+  const filteredChats = useMemo(() => {
+    const normalizedQuery = searchQuery.trim().toLowerCase();
 
-    loadChats();
+    const base = [...threads].sort((a, b) => {
+      const aTs = Date.parse(a.last_message_at || a.updated_at || '');
+      const bTs = Date.parse(b.last_message_at || b.updated_at || '');
+      return (Number.isNaN(bTs) ? 0 : bTs) - (Number.isNaN(aTs) ? 0 : aTs);
+    });
 
-    // Optional: listen for storage changes in case of cross-tab creation
-    window.addEventListener('storage', loadChats);
-    return () => window.removeEventListener('storage', loadChats);
-  }, []);
-
-  const filteredChats = displayChats.filter((chat) =>
-    chat.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+    if (!normalizedQuery) return base;
+    return base.filter((thread) => threadDisplayName(thread).toLowerCase().includes(normalizedQuery));
+  }, [threads, searchQuery]);
 
   return (
     <div className={`w-full md:w-80 border-r border-gray-100 dark:border-white/5 bg-white dark:bg-[#050505] flex flex-col h-full transition-colors ${className}`}>
-      {/* Header with Title and Settings Icon */}
       <div className="p-6 pb-2">
         <div className="flex items-center justify-between mb-8">
           <h2 className="text-xl font-bold text-gray-900 dark:text-white tracking-tight transition-colors">Сообщения</h2>
@@ -117,7 +65,6 @@ export default function ChatsList({ selectedChatId, onSelectChat, className = ''
           </button>
         </div>
 
-        {/* Create new chat button */}
         <button
           onClick={() => router.push('/chats/new')}
           className="w-full flex items-center justify-center gap-2 bg-[#F3E8D6]/60 hover:bg-[#F3E8D6]/80 dark:bg-[#7c3aed] dark:hover:bg-[#6d28d9] text-gray-900 dark:text-white font-bold py-5 px-4 rounded-[20px] transition-all mb-8 border border-[#F3E8D6]/20 dark:border-transparent shadow-sm"
@@ -126,7 +73,6 @@ export default function ChatsList({ selectedChatId, onSelectChat, className = ''
           <span className="text-[17px]">Создать групповой чат</span>
         </button>
 
-        {/* Search */}
         <div className="relative mb-6">
           <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
@@ -139,44 +85,55 @@ export default function ChatsList({ selectedChatId, onSelectChat, className = ''
         </div>
       </div>
 
-      {/* Chats list */}
       <div className="flex-1 overflow-y-auto px-4">
-        {filteredChats.length > 0 ? (
-          filteredChats.map((chat) => (
-            <button
-              key={chat.id}
-              onClick={() => onSelectChat?.(chat.id)}
-              className={`w-full flex items-center gap-4 p-3.5 rounded-[12px] transition-all mb-1 group ${selectedChatId === chat.id ? 'bg-[#f8f9fa] dark:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-white/5'
-                }`}
-            >
-              <div className="relative shrink-0">
-                <div className="w-12 h-12 rounded-full overflow-hidden bg-gray-100 dark:bg-white/10 flex items-center justify-center">
-                  {chat.avatar.startsWith('/') ? (
-                    <div className="w-full h-full bg-[#D1B891] flex items-center justify-center text-white font-bold text-lg">
-                      {chat.name[0]}
-                    </div>
-                  ) : (
-                    <img
-                      src={chat.avatar}
-                      alt={chat.name}
-                      className="w-full h-full object-cover"
-                    />
+        {loading && (
+          <div className="p-8 text-center text-gray-500 dark:text-gray-400">
+            <p className="text-sm font-medium">Загрузка чатов...</p>
+          </div>
+        )}
+
+        {!loading && filteredChats.length > 0 && (
+          filteredChats.map((thread) => {
+            const name = threadDisplayName(thread);
+            const time = formatThreadTime(thread.last_message_at || thread.updated_at);
+            const preview = thread.last_message || (thread.last_message_type ? `[${thread.last_message_type}]` : 'Сообщений пока нет');
+            const isSelected = selectedChatId === thread.id;
+
+            return (
+              <button
+                key={thread.id}
+                onClick={() => onSelectChat?.(thread.id)}
+                className={`w-full flex items-center gap-4 p-3.5 rounded-[12px] transition-all mb-1 group ${isSelected ? 'bg-[#f8f9fa] dark:bg-white/10' : 'hover:bg-gray-50 dark:hover:bg-white/5'}`}
+              >
+                <div className="relative shrink-0">
+                  {(() => {
+                    const avatarSrc = !thread.is_group ? getFileUrl(thread.partner_avatar_url) : null;
+                    return avatarSrc ? (
+                      <img src={avatarSrc} alt={name} className="w-12 h-12 rounded-full object-cover" />
+                    ) : (
+                      <div className="w-12 h-12 rounded-full bg-[#D1B891] text-white font-bold flex items-center justify-center">
+                        {name.charAt(0).toUpperCase()}
+                      </div>
+                    );
+                  })()}
+                  {!thread.is_group && (
+                    <span className={`absolute bottom-0 right-0 w-3.5 h-3.5 border-2 border-white dark:border-[#050505] rounded-full ${thread.online ? 'bg-emerald-500' : 'bg-gray-400'}`} />
                   )}
                 </div>
-                {chat.online && (
-                  <span className="absolute bottom-0 right-0 w-3.5 h-3.5 bg-green-500 border-2 border-white dark:border-card rounded-full" />
-                )}
-              </div>
-              <div className="flex-1 text-left min-w-0">
-                <div className="flex items-center justify-between mb-0.5">
-                  <h3 className="font-bold text-gray-900 dark:text-white text-[14px] truncate tracking-tight transition-colors">{chat.name}</h3>
-                  <span className={`text-[11px] font-medium ${chat.time === 'только что' ? 'text-amber-600 dark:text-amber-400 font-bold' : 'text-gray-400'}`}>{chat.time}</span>
+
+                <div className="flex-1 text-left min-w-0">
+                  <div className="flex items-center justify-between mb-0.5 gap-2">
+                    <h3 className="font-bold text-gray-900 dark:text-white text-[14px] truncate tracking-tight transition-colors">{name}</h3>
+                    <span className="text-[11px] font-medium text-gray-400">{time}</span>
+                  </div>
+                  <p className="text-[13px] text-gray-500 dark:text-gray-400 truncate leading-snug transition-colors">{preview}</p>
                 </div>
-                <p className="text-[13px] text-gray-500 dark:text-gray-400 truncate leading-snug transition-colors">{chat.lastMessage}</p>
-              </div>
-            </button>
-          ))
-        ) : (
+              </button>
+            );
+          })
+        )}
+
+        {!loading && filteredChats.length === 0 && (
           <div className="p-8 text-center text-gray-500 dark:text-gray-400 transition-colors">
             <p className="text-sm font-medium">Чаты не найдены</p>
           </div>

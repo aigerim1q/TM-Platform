@@ -1,86 +1,66 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getApiStatus } from "@/lib/api";
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { useParams } from "next/navigation";
+import { Camera } from "lucide-react";
 
 import Header from "@/components/header";
-import { getUserManager, getUserProfile, getUserSubordinates, type UserPublic } from "@/lib/users";
-import { getDisplayNameFromEmail } from "@/lib/utils";
+import { getApiErrorMessage, getApiStatus, getCurrentUserId } from "@/lib/api";
+import {
+  getUserProfile,
+  uploadProfileImage,
+  updateUserProfile,
+  type UserPublic,
+} from "@/lib/users";
+import { getDisplayNameFromEmail, getFileUrl } from "@/lib/utils";
 
-export default function UserProfilePage({ params }: { params: { id: string } }) {
-  const userId = params.id;
+export default function UserProfilePage() {
+  const params = useParams<{ id?: string | string[] }>();
+  const rawId = params?.id;
+  const userId = Array.isArray(rawId) ? rawId[0] || "" : rawId || "";
+  const [currentUserId, setCurrentUserId] = useState("");
+  const isSelf = useMemo(() => Boolean(currentUserId) && currentUserId === userId, [currentUserId, userId]);
+
   const [user, setUser] = useState<UserPublic | null>(null);
-  const [manager, setManager] = useState<UserPublic | null>(null);
-  const [managerLoading, setManagerLoading] = useState(false);
-  const [managerError, setManagerError] = useState<string | null>(null);
-  const [subordinates, setSubordinates] = useState<UserPublic[]>([]);
-  const [subordinatesLoading, setSubordinatesLoading] = useState(false);
-  const [subordinatesError, setSubordinatesError] = useState<string | null>(null);
+
+  const [fullName, setFullName] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState("");
+  const [avatarUploading, setAvatarUploading] = useState(false);
+  const [email, setEmail] = useState("");
+
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [forbidden, setForbidden] = useState(false);
 
   useEffect(() => {
+    setCurrentUserId(getCurrentUserId());
+  }, []);
+
+  useEffect(() => {
+    if (!userId || userId === "undefined" || userId === "null") {
+      setLoading(false);
+      setError("Некорректный идентификатор пользователя");
+      return;
+    }
+
     let isMounted = true;
     setLoading(true);
     setError(null);
     setForbidden(false);
-    setManager(null);
-    setManagerError(null);
-    setSubordinates([]);
-    setSubordinatesError(null);
+    setSaveError(null);
+    setSaveMessage(null);
 
     getUserProfile(userId)
       .then((data) => {
         if (!isMounted) return;
         setUser(data);
-
-        setManagerLoading(true);
-        setSubordinatesLoading(true);
-
-        const managerPromise = getUserManager(userId)
-          .then((managerData) => {
-            if (!isMounted) return;
-            setManager(managerData);
-          })
-          .catch((managerErr) => {
-            if (!isMounted) return;
-            const status = getApiStatus(managerErr);
-            if (status === 403) {
-              setForbidden(true);
-              return;
-            }
-            if (status && status >= 400) {
-              setManagerError("Ошибка загрузки руководителя");
-            }
-          })
-          .finally(() => {
-            if (!isMounted) return;
-            setManagerLoading(false);
-          });
-
-        const subordinatesPromise = getUserSubordinates(userId)
-          .then((items) => {
-            if (!isMounted) return;
-            setSubordinates(items);
-          })
-          .catch((subErr) => {
-            if (!isMounted) return;
-            const status = getApiStatus(subErr);
-            if (status === 403) {
-              setForbidden(true);
-              return;
-            }
-            if (status && status >= 400) {
-              setSubordinatesError("Ошибка загрузки подчинённых");
-            }
-          })
-          .finally(() => {
-            if (!isMounted) return;
-            setSubordinatesLoading(false);
-          });
-
-        return Promise.all([managerPromise, subordinatesPromise]);
+        setFullName(data.full_name || "");
+        setAvatarUrl(data.avatar_url || "");
+        setEmail(data.email || "");
       })
       .catch((err) => {
         if (!isMounted) return;
@@ -105,83 +85,153 @@ export default function UserProfilePage({ params }: { params: { id: string } }) 
     };
   }, [userId]);
 
+  const handleSave = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!isSelf || !user) return;
+
+    setSaving(true);
+    setSaveError(null);
+    setSaveMessage(null);
+
+    try {
+      const updatedProfile = await updateUserProfile(user.id, {
+        email: email.trim(),
+        full_name: fullName.trim() ? fullName.trim() : null,
+        avatar_url: avatarUrl.trim() ? avatarUrl.trim() : null,
+      });
+
+      setUser(updatedProfile);
+      setSaveMessage("Профиль обновлён");
+      window.dispatchEvent(new Event("tm-profile-updated"));
+    } catch (err) {
+      setSaveError(getApiErrorMessage(err, "Не удалось сохранить профиль"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAvatarFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setAvatarUploading(true);
+    setSaveError(null);
+    setSaveMessage(null);
+
+    try {
+      const uploaded = await uploadProfileImage(file);
+      setAvatarUrl(uploaded.url);
+      setSaveMessage("Фото загружено. Нажмите «Сохранить».");
+    } catch (err) {
+      setSaveError(getApiErrorMessage(err, "Не удалось загрузить фото"));
+    } finally {
+      setAvatarUploading(false);
+      event.target.value = "";
+    }
+  };
+
+  const displayName = fullName || getDisplayNameFromEmail(email || user?.email);
+  const resolvedAvatar = getFileUrl(avatarUrl) || avatarUrl;
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
 
-      <div className="pt-24 px-6">
-        <div className="mx-auto max-w-3xl rounded-2xl border border-white/20 bg-white/80 p-6 shadow-[0px_4px_90px_0px_rgba(240,230,218,1)] backdrop-blur-sm dark:border-white/10 dark:bg-slate-900/70 dark:shadow-[0_25px_80px_rgba(0,0,0,0.55)]">
-          <h1 className="text-2xl font-semibold">Профиль пользователя</h1>
-
-          {loading && <p className="mt-4 text-sm text-gray-500">Загрузка...</p>}
+      <div className="pt-28 px-4">
+        <div className="mx-auto max-w-md">
+          {loading && <p className="text-center text-sm text-gray-500">Загрузка...</p>}
 
           {forbidden && (
-            <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-              Доступ запрещён. У вас нет прав для просмотра этого профиля.
+            <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
+              Доступ запрещён.
             </div>
           )}
 
-          {error && !forbidden && (
-            <p className="mt-4 text-sm text-red-600">{error}</p>
-          )}
+          {error && !forbidden && <p className="text-center text-sm text-red-600">{error}</p>}
 
           {!loading && !error && !forbidden && user && (
-            <div className="mt-6 space-y-3 text-sm text-gray-700 dark:text-gray-200">
-              <div>
-                <span className="font-medium">ID:</span> {user.id}
+            <form onSubmit={handleSave} className="space-y-8">
+              {/* Avatar */}
+              <div className="flex flex-col items-center gap-3">
+                <div className="group relative">
+                  <div className="h-28 w-28 overflow-hidden rounded-full bg-[#D1B891] ring-4 ring-white/20 dark:ring-white/10">
+                    {avatarUrl ? (
+                      <img src={resolvedAvatar} alt="Avatar" className="h-full w-full object-cover" />
+                    ) : (
+                      <div className="flex h-full w-full items-center justify-center text-3xl font-bold text-white">
+                        {(displayName.charAt(0) || "?").toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+
+                  {isSelf && (
+                    <label className="absolute inset-0 flex cursor-pointer items-center justify-center rounded-full bg-black/0 transition-colors hover:bg-black/40">
+                      <Camera size={24} className="text-white opacity-0 transition-opacity group-hover:opacity-100" />
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/jpg,image/webp"
+                        onChange={handleAvatarFileChange}
+                        disabled={avatarUploading}
+                        className="hidden"
+                      />
+                    </label>
+                  )}
+                </div>
+                {avatarUploading && <p className="text-xs text-gray-400">Загрузка фото...</p>}
               </div>
-              <div>
-                <span className="font-medium">Имя:</span> {getDisplayNameFromEmail(user.email)}
+
+              {/* Fields */}
+              <div className="space-y-4">
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Имя</span>
+                  <input
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Ваше имя"
+                    disabled={!isSelf}
+                    className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition-colors focus:border-amber-400 disabled:opacity-60 dark:border-white/10 dark:bg-white/5 dark:text-white"
+                  />
+                </label>
+
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Email</span>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    disabled={!isSelf}
+                    className="w-full rounded-xl border border-gray-200 bg-white px-4 py-3 text-sm outline-none transition-colors focus:border-amber-400 disabled:opacity-60 dark:border-white/10 dark:bg-white/5 dark:text-white"
+                  />
+                </label>
               </div>
-              <div>
-                <span className="font-medium">Role:</span> {user.role || "—"}
-              </div>
-              <div>
-                <span className="font-medium">Manager ID:</span> {user.manager_id || "—"}
-              </div>
-              <div>
-                <span className="font-medium">Created:</span> {new Date(user.created_at).toLocaleString()}
-              </div>
-              <div className="pt-3">
-                <span className="font-medium">Руководитель:</span>{" "}
-                {managerLoading && <span className="text-gray-500">Загрузка...</span>}
-                {!managerLoading && managerError && (
-                  <span className="text-red-600">{managerError}</span>
-                )}
-                {!managerLoading && !managerError && !manager && (
-                  <span className="text-gray-500">Нет руководителя</span>
-                )}
-                {!managerLoading && !managerError && manager && (
-                  <span>
-                    {getDisplayNameFromEmail(manager.email)} ({manager.role || "—"})
-                  </span>
-                )}
-              </div>
-              <div className="pt-3">
-                <span className="font-medium">Подчинённые:</span>
-                {subordinatesLoading && (
-                  <span className="ml-2 text-gray-500">Загрузка...</span>
-                )}
-                {!subordinatesLoading && subordinatesError && (
-                  <span className="ml-2 text-red-600">{subordinatesError}</span>
-                )}
-                {!subordinatesLoading && !subordinatesError && subordinates.length === 0 && (
-                  <span className="ml-2 text-gray-500">Нет подчинённых</span>
-                )}
-                {!subordinatesLoading && !subordinatesError && subordinates.length > 0 && (
-                  <ul className="mt-2 space-y-1">
-                    {subordinates.map((item) => (
-                      <li key={item.id} className="flex items-center justify-between rounded-lg border border-white/20 bg-white/60 px-3 py-2 text-sm text-gray-700 shadow-sm dark:border-white/10 dark:bg-slate-900/50 dark:text-gray-200">
-                        <span>{getDisplayNameFromEmail(item.email)}</span>
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {item.role || "—"}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </div>
+
+              {/* Save */}
+              {isSelf && (
+                <div className="space-y-3">
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="w-full rounded-xl bg-amber-500 py-3 text-sm font-semibold text-white transition-colors hover:bg-amber-600 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {saving ? "Сохранение..." : "Сохранить"}
+                  </button>
+
+                  {saveMessage && (
+                    <p className="text-center text-sm text-emerald-500">{saveMessage}</p>
+                  )}
+                  {saveError && (
+                    <p className="text-center text-sm text-red-500">{saveError}</p>
+                  )}
+                </div>
+              )}
+
+              {!isSelf && (
+                <p className="text-center text-xs text-gray-400 dark:text-gray-500">
+                  Редактирование доступно только владельцу профиля
+                </p>
+              )}
+            </form>
           )}
         </div>
       </div>

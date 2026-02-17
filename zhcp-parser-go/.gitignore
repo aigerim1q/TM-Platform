@@ -1,0 +1,61 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+zhcp-parser
+zhcp-parser.exe
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+logs/
+*.log
+
+# Test results and temporary files
+result*.json
+output*.json
+test_output/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS files
+Thumbs.db
+desktop.ini
+
+# Environment variables
+.env
+.env.local
+
+# API Keys (safety)
+*_api_key*
+*.key
+
+# Build artifacts
+dist/
+build/
+bin/
+
+# Temporary test files
+test_extraction/
+temp/
+tmp/

@@ -1,0 +1,247 @@
+/* ─── Org-Chart Tree Layout ──────────────────────────────────────────
+   Nested <ul>/<li> structure with CSS pseudo-element connector lines,
+   matching the classic horizontal org-chart pattern.
+   ──────────────────────────────────────────────────────────────────── */
+
+.org-chart {
+  display: flex;
+  justify-content: center;
+  overflow-x: auto;
+  padding-bottom: 40px;
+}
+
+.org-chart ul {
+  padding-top: 20px;
+  position: relative;
+  padding-left: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.org-chart ul ul {
+  padding-top: 30px;
+}
+
+.org-chart li {
+  list-style-type: none;
+  text-align: center;
+  position: relative;
+  padding: 18px 8px 0 8px;
+}
+
+/* ─── Horizontal + vertical connector lines ─────────────────────── */
+.org-chart li::before,
+.org-chart li::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: 50%;
+  border-top: 1px solid #d1d5db;
+  width: 50%;
+  height: 18px;
+}
+
+.org-chart li::after {
+  right: auto;
+  left: 50%;
+  border-left: 1px solid #d1d5db;
+}
+
+/* Hide connectors on single children */
+.org-chart li:only-child::before,
+.org-chart li:only-child::after {
+  display: none;
+}
+
+.org-chart li:only-child {
+  padding-top: 0;
+}
+
+/* Remove outer borders on first/last child */
+.org-chart li:first-child::before,
+.org-chart li:last-child::after {
+  border: 0 none;
+}
+
+.org-chart li:last-child::before {
+  border-right: 1px solid #d1d5db;
+  border-radius: 0 5px 0 0;
+}
+
+.org-chart li:first-child::after {
+  border-radius: 5px 0 0 0;
+}
+
+/* Vertical drop line from parent to children row */
+.org-chart ul ul::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  border-left: 1px solid #d1d5db;
+  width: 0;
+  height: 26px;
+}
+
+/* ─── Card base ─────────────────────────────────────────────────── */
+.org-card {
+  background: #ffffff;
+  border-radius: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e5e7eb;
+  min-width: 210px;
+  max-width: 260px;
+  margin: 0 auto;
+  box-shadow: 0 2px 4px rgba(15, 23, 42, 0.06);
+  text-align: left;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.org-card:hover {
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.12);
+  transform: translateY(-1px);
+}
+
+/* CEO / company root */
+.org-card.ceo {
+  border: 1px solid #2563eb;
+  box-shadow: 0 4px 10px rgba(37, 99, 235, 0.25);
+}
+
+.org-card.ceo:hover {
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.3);
+}
+
+/* Department nodes */
+.org-card.dept {
+  background: #f9fafb;
+}
+
+/* ─── Avatar ────────────────────────────────────────────────────── */
+.org-avatar-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.org-avatar {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 2px solid #e5e7eb;
+  background: #f3f4f6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  color: #9ca3af;
+  flex-shrink: 0;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+.org-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 999px;
+}
+
+/* ─── Person info ───────────────────────────────────────────────── */
+.org-person-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.org-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #111827;
+}
+
+.org-name {
+  font-size: 13px;
+  color: #374151;
+}
+
+/* ─── Status badge ──────────────────────────────────────────────── */
+.org-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.org-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+}
+
+.org-status-free {
+  background: #ecfdf3;
+  color: #166534;
+}
+.org-status-free .org-status-dot {
+  background: #22c55e;
+}
+
+.org-status-busy {
+  background: #fef3c7;
+  color: #92400e;
+}
+.org-status-busy .org-status-dot {
+  background: #f59e0b;
+}
+
+.org-status-sick {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.org-status-sick .org-status-dot {
+  background: #ef4444;
+}
+
+/* ─── Note ──────────────────────────────────────────────────────── */
+.org-note {
+  font-size: 11px;
+  color: #6b7280;
+  margin-top: 4px;
+}
+
+/* ─── Dark mode overrides ───────────────────────────────────────── */
+@media (prefers-color-scheme: dark) {
+  .org-card {
+    background: #1f2937;
+    border-color: #374151;
+  }
+  .org-card.dept {
+    background: #111827;
+  }
+  .org-card.ceo {
+    border-color: #3b82f6;
+  }
+  .org-title {
+    color: #f3f4f6;
+  }
+  .org-name {
+    color: #d1d5db;
+  }
+  .org-avatar {
+    background: #374151;
+    border-color: #4b5563;
+    color: #6b7280;
+  }
+  .org-chart li::before,
+  .org-chart li::after,
+  .org-chart ul ul::before,
+  .org-chart li:last-child::before {
+    border-color: #4b5563;
+  }
+}

@@ -1,4 +1,17 @@
 services:
+  zhcp-parser:
+    build:
+      context: ./zhcp-parser-go
+      dockerfile: Dockerfile
+    container_name: tm_platform_zhcp_parser
+    restart: unless-stopped
+    environment:
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+    ports:
+      - "8081:8081"
+    volumes:
+      - zhcp_parser_data:/data
+
   postgres:
     image: postgres:16
     container_name: tm_platform_postgres
@@ -30,6 +43,7 @@ services:
     depends_on:
       - postgres
       - migrate
+      - zhcp-parser
     environment:
       SERVER_ADDR: ":8080"
       DB_HOST: "postgres"
@@ -39,6 +53,7 @@ services:
       DB_NAME: "tm_db"
       DB_SSLMODE: "disable"
       JWT_SECRET: "change_me"
+      ZHCP_PARSER_URL: "http://zhcp-parser:8081"
     ports:
       - "8080:8080"
     volumes:
@@ -60,3 +75,4 @@ services:
 
 volumes:
   tm_platform_pgdata:
+  zhcp_parser_data:

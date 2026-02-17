@@ -1,16 +1,24 @@
 'use client';
 
 import { useRouter, useParams } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Clock, Users, Plus, Trash2 } from 'lucide-react';
 import Header from '@/components/header';
 import ResponsiblePersonsModal from '@/components/responsible-persons-modal';
 import DelayReportsModal from '@/components/delay-reports-modal';
 import ProjectExpenseReportModal from '@/components/project-expense-report-modal';
 import EditorModeBadge from '@/components/editor-mode-badge';
-import { getFileUrl } from '@/lib/utils';
+import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
 import { useProject } from '@/hooks/useProject';
 import { api, getApiErrorMessage } from '@/lib/api';
+
+type ProjectMemberEntity = {
+  user: {
+    id: string;
+    email: string;
+  };
+  role: 'owner' | 'manager' | 'member';
+};
 
 function formatProjectBudget(budget: number | null | undefined) {
   if (budget == null || !Number.isFinite(budget)) {
@@ -64,6 +72,7 @@ export default function ProjectOverviewPage() {
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
   const [isCreatingExpense, setIsCreatingExpense] = useState(false);
+  const [responsibleNames, setResponsibleNames] = useState<string[]>([]);
 
   const projectId = params.id as string;
   const { project, error: projectError, refresh, setProject } = useProject(projectId);
@@ -73,12 +82,37 @@ export default function ProjectOverviewPage() {
   const userRole = (project?.current_user_role || project?.currentUserRole || 'member') as 'owner' | 'manager' | 'member';
   const canManageProject = userRole === 'owner' || userRole === 'manager';
 
+  const loadResponsibleMembers = async () => {
+    const normalizedProjectId = String(project?.id || projectId || '').trim();
+    if (!normalizedProjectId) {
+      setResponsibleNames([]);
+      return;
+    }
+
+    try {
+      const { data } = await api.get<ProjectMemberEntity[]>(`/projects/${normalizedProjectId}/members`);
+      const members = Array.isArray(data) ? data : [];
+      const names = members
+        .filter((member) => member.role === 'member')
+        .map((member) => getDisplayNameFromEmail(member.user.email))
+        .filter((name) => String(name || '').trim().length > 0);
+
+      setResponsibleNames(names);
+    } catch {
+      setResponsibleNames([]);
+    }
+  };
+
+  useEffect(() => {
+    void loadResponsibleMembers();
+  }, [project?.id, projectId]);
+
   const projectData = {
     title: projectName,
     image: coverUrl,
     startDate: formatProjectDeadline(project?.start_date || project?.startDate),
     deadline: formatProjectDeadline(project?.deadline),
-    responsible: 'Омар Ахмет, Зейнулла Рышман, Серик Рах...',
+    responsible: responsibleNames.length > 0 ? responsibleNames.join(', ') : 'не назначены',
     hasWarning: true,
     warningText: 'Причины просрочки',
   };
@@ -720,7 +754,10 @@ export default function ProjectOverviewPage() {
         onClose={() => setIsResponsibleModalOpen(false)}
         projectId={project?.id || projectId}
         userRole={userRole}
-        onChanged={refresh}
+        onChanged={async () => {
+          await refresh();
+          await loadResponsibleMembers();
+        }}
       />
 
       <DelayReportsModal

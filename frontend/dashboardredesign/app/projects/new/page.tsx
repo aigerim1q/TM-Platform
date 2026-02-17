@@ -175,7 +175,21 @@ type ProjectPageResponse = {
 type ProjectPageListItem = {
   id: string;
   title: string;
+  blocks?: unknown;
+  blocks_json?: unknown;
 };
+
+type PageBreadcrumbItem = {
+  id: string;
+  title: string;
+};
+
+function normalizeBlockArray(raw: unknown): Block[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  return raw as Block[];
+}
 
 type NewProjectPageContentProps = {
   existingProjectId?: string;
@@ -191,6 +205,8 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
   const entityType: EditorMode = mode;
   const isPageEntity = entityType === 'page';
   const pageIdFromQuery = String(existingPageId || searchParams.get('pageId') || '');
+  const returnToParamRaw = String(searchParams.get('returnTo') || '');
+  const returnToPath = returnToParamRaw.startsWith('/') ? returnToParamRaw : '';
   const [projectId, setProjectId] = useState('');
   const [isCreatingProject, setIsCreatingProject] = useState(true);
   const { project } = useProject(existingProjectId);
@@ -221,6 +237,7 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isUploadingCover, setIsUploadingCover] = useState(false);
   const [pageSaveStatus, setPageSaveStatus] = useState<PageSaveStatus>('idle');
+  const [pageBreadcrumbs, setPageBreadcrumbs] = useState<PageBreadcrumbItem[]>([]);
 
   const [blocks, setBlocks] = useState<Block[]>([
     { id: '1', type: 'text', content: '' }
@@ -384,6 +401,90 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
   }, [applyPageTitlesToBlocks, existingProjectId, mode, project, projectId]);
 
   useEffect(() => {
+    const targetProjectID = projectId || existingProjectId || '';
+    if (mode !== 'page' || !targetProjectID || !pageIdFromQuery) {
+      setPageBreadcrumbs([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const buildBreadcrumbs = async () => {
+      try {
+        const { data } = await api.get<ProjectPageListItem[]>(`/projects/${targetProjectID}/pages`);
+        if (cancelled) {
+          return;
+        }
+
+        const pages = Array.isArray(data) ? data : [];
+        const pageByID = new Map<string, ProjectPageListItem>();
+        pages.forEach((item) => {
+          if (item?.id) {
+            pageByID.set(String(item.id), item);
+          }
+        });
+
+        const parentByChild = new Map<string, { parentId: string }>();
+
+        const collectParentLinks = (parentID: string, blocksRaw: unknown) => {
+          const blocks = normalizeBlockArray(blocksRaw);
+          for (const block of blocks) {
+            if (block?.type === 'page' && block.pageId && !parentByChild.has(block.pageId)) {
+              parentByChild.set(block.pageId, { parentId: parentID });
+            }
+          }
+        };
+
+        collectParentLinks('root', project?.blocks);
+        for (const page of pages) {
+          if (!page?.id) continue;
+          const rawBlocks = Array.isArray(page.blocks)
+            ? page.blocks
+            : Array.isArray(page.blocks_json)
+              ? page.blocks_json
+              : [];
+          collectParentLinks(String(page.id), rawBlocks);
+        }
+
+        const chain: PageBreadcrumbItem[] = [];
+        const visited = new Set<string>();
+        let cursor = pageIdFromQuery;
+
+        while (cursor && cursor !== 'root' && !visited.has(cursor)) {
+          visited.add(cursor);
+          const node = pageByID.get(cursor);
+          const pageTitle = cursor === pageIdFromQuery
+            ? (String(title || '').trim() || 'Страница')
+            : (String(node?.title || '').trim() || 'Страница');
+          chain.unshift({ id: cursor, title: pageTitle });
+
+          const parentRef = parentByChild.get(cursor);
+          if (!parentRef) {
+            break;
+          }
+          cursor = parentRef.parentId;
+        }
+
+        const rootTitle = String(project?.title || 'Главный проект').trim() || 'Главный проект';
+        setPageBreadcrumbs([{ id: 'root', title: rootTitle }, ...chain]);
+      } catch {
+        const rootTitle = String(project?.title || 'Главный проект').trim() || 'Главный проект';
+        const currentTitle = String(title || 'Страница').trim() || 'Страница';
+        setPageBreadcrumbs([
+          { id: 'root', title: rootTitle },
+          { id: pageIdFromQuery, title: currentTitle },
+        ]);
+      }
+    };
+
+    void buildBreadcrumbs();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [existingProjectId, mode, pageIdFromQuery, project?.blocks, project?.title, projectId, title]);
+
+  useEffect(() => {
     const targetProjectId = projectId || existingProjectId || '';
     if (mode !== 'page' || !targetProjectId || !pageIdFromQuery) {
       return;
@@ -479,6 +580,18 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
     }
   }, [blocks, isReadOnly, mode, pageIdFromQuery, projectId, title]);
 
+  const navigateWithPageSave = useCallback(async (targetPath: string) => {
+    if (!targetPath) {
+      return;
+    }
+
+    if (mode === 'page' && !isReadOnly && projectId && pageIdFromQuery && pageLoadedRef.current) {
+      await savePage();
+    }
+
+    router.push(targetPath);
+  }, [isReadOnly, mode, pageIdFromQuery, projectId, router, savePage]);
+
   useEffect(() => {
     if (mode !== 'page' || isReadOnly || !projectId || !pageIdFromQuery || !pageLoadedRef.current) {
       return;
@@ -522,7 +635,7 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
     if (!block) return;
 
     if (block.pageId && projectId) {
-      router.push(`/project/${projectId}/editor/page/${block.pageId}`);
+      void navigateWithPageSave(`/project/${projectId}/editor/page/${block.pageId}`);
       return;
     }
 
@@ -1066,6 +1179,17 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
     }
   };
 
+  const navigateBackToEditor = () => {
+    if (returnToPath) {
+      void navigateWithPageSave(returnToPath);
+      return;
+    }
+
+    if (projectId) {
+      void navigateWithPageSave(`/project/${projectId}/editor`);
+    }
+  };
+
   if (isPageEntity) {
     return (
       <div className="flex h-screen bg-white dark:bg-background">
@@ -1074,31 +1198,41 @@ function NewProjectPageContent({ existingProjectId, existingPageId, forcedMode }
         <main className="flex-1 overflow-y-auto">
           <div className="max-w-4xl mx-auto px-16 py-12">
             <div className="mb-6 flex flex-wrap items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
-              <span>Новый проект</span>
-              <span>/</span>
-              <button
-                type="button"
-                onClick={() => {
-                  if (projectId) {
-                    router.push(`/project/${projectId}/editor`);
-                  }
-                }}
-                className="font-medium text-gray-700 hover:text-gray-900 hover:underline dark:text-gray-300 dark:hover:text-white"
-              >
-                Главный проект
-              </button>
-              <span>/</span>
-              <span className="font-medium text-gray-900 dark:text-white">Страница</span>
+              {(pageBreadcrumbs.length > 0 ? pageBreadcrumbs : [{ id: 'root', title: 'Главный проект' }, { id: pageIdFromQuery || 'current', title: title || 'Страница' }]).map((crumb, index, arr) => {
+                const isLast = index === arr.length - 1;
+                const label = crumb.title?.trim() || 'Страница';
+
+                return (
+                  <React.Fragment key={`${crumb.id}-${index}`}>
+                    {index > 0 && <span>/</span>}
+                    {isLast ? (
+                      <span className="font-medium text-gray-900 dark:text-white">{label}</span>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (crumb.id === 'root') {
+                            navigateBackToEditor();
+                            return;
+                          }
+                          const targetProjectID = projectId || existingProjectId || '';
+                          if (!targetProjectID) return;
+                          void navigateWithPageSave(`/project/${targetProjectID}/editor/page/${crumb.id}`);
+                        }}
+                        className="font-medium text-gray-700 hover:text-gray-900 hover:underline dark:text-gray-300 dark:hover:text-white"
+                      >
+                        {label}
+                      </button>
+                    )}
+                  </React.Fragment>
+                );
+              })}
             </div>
 
             <div className="mb-4 flex items-center justify-between gap-3">
               <button
                 type="button"
-                onClick={() => {
-                  if (projectId) {
-                    router.push(`/project/${projectId}/editor`);
-                  }
-                }}
+                onClick={navigateBackToEditor}
                 className="text-sm font-medium text-gray-600 hover:text-gray-900 dark:text-gray-300 dark:hover:text-white"
               >
                 ← Назад в редактор

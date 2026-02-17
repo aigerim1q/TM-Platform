@@ -333,6 +333,14 @@ export default function ReportsPage() {
               <button className="bg-black dark:bg-white text-white dark:text-black px-6 py-2.5 rounded-full text-sm font-semibold whitespace-nowrap">
                 Отчеты
               </button>
+
+              <button
+                type="button"
+                onClick={() => router.push('/documents')}
+                className="bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400 px-6 py-2.5 rounded-full text-sm font-semibold hover:bg-gray-200 dark:hover:bg-gray-700 transition-colors whitespace-nowrap"
+              >
+                Документы
+              </button>
             </div>
           </div>
 

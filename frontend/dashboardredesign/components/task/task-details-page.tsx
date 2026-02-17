@@ -277,6 +277,13 @@ export default function ProjectTaskPage() {
               <Share2 className="h-4 w-4" /> Делегировать
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => router.push('/documents')}
+            className="inline-flex items-center gap-2 rounded-full border border-gray-300 px-5 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+          >
+            <Paperclip className="h-4 w-4" /> Документы
+          </button>
         </div>
 
         <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-gray-700 dark:bg-gray-900 mb-8">
