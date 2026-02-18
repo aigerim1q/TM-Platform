@@ -31,11 +31,27 @@ type TaskAPI = {
   deadline?: string | null;
   status?: string;
   blocks?: unknown;
+  assignees?: unknown;
 };
 
 type SubordinateUser = {
   id: string;
   email: string;
+};
+
+type HierarchyTreeUser = {
+  id?: string;
+  email?: string;
+};
+
+type HierarchyTreeNode = {
+  user_id?: string | null;
+  user?: HierarchyTreeUser | null;
+  children?: HierarchyTreeNode[];
+};
+
+type HierarchyTreeResponse = {
+  tree?: HierarchyTreeNode[];
 };
 
 type DashboardProject = {
@@ -156,6 +172,51 @@ function isDeadlineOverdue(deadline: string | null) {
 function isTaskCompletedStatus(status?: string) {
   const normalized = String(status || '').toLowerCase();
   return normalized === 'done' || normalized === 'completed';
+}
+
+function normalizeToken(value: unknown) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function addUserTokens(target: Set<string>, userID?: unknown, email?: unknown) {
+  const normalizedID = normalizeToken(userID);
+  const normalizedEmail = normalizeToken(email);
+
+  if (normalizedID) {
+    target.add(normalizedID);
+  }
+  if (normalizedEmail) {
+    target.add(normalizedEmail);
+  }
+}
+
+function collectSubordinateTokensFromNode(node: HierarchyTreeNode, target: Set<string>) {
+  const children = Array.isArray(node.children) ? node.children : [];
+  children.forEach((child) => {
+    addUserTokens(target, child.user?.id || child.user_id, child.user?.email);
+    collectSubordinateTokensFromNode(child, target);
+  });
+}
+
+function collectHierarchySubordinateTokens(tree: HierarchyTreeNode[], currentUserId: string): Set<string> {
+  const targetUser = normalizeToken(currentUserId);
+  const tokens = new Set<string>();
+  if (!targetUser) {
+    return tokens;
+  }
+
+  const walk = (node: HierarchyTreeNode) => {
+    const nodeUserID = normalizeToken(node.user?.id || node.user_id);
+    if (nodeUserID && nodeUserID === targetUser) {
+      collectSubordinateTokensFromNode(node, tokens);
+    }
+
+    const children = Array.isArray(node.children) ? node.children : [];
+    children.forEach(walk);
+  };
+
+  tree.forEach(walk);
+  return tokens;
 }
 
 function ProjectCard({ id, title, coverUrl, budget, deadline, onClick, onDelete }: ProjectCardProps) {
@@ -514,15 +575,30 @@ export default function DashboardContent() {
         const subordinateTaskCards: DashboardTaskCard[] = [];
 
         const currentUserId = getCurrentUserId();
-        let subordinateIds = new Set<string>();
+        let subordinateTokens = new Set<string>();
         if (currentUserId) {
           const { data: subordinateUsers } = await api.get<SubordinateUser[]>(`/users/${currentUserId}/subordinates`);
-          subordinateIds = new Set((Array.isArray(subordinateUsers) ? subordinateUsers : []).map((user) => user.id));
+          const directSubordinates = Array.isArray(subordinateUsers) ? subordinateUsers : [];
+          directSubordinates.forEach((user) => {
+            addUserTokens(subordinateTokens, user.id, user.email);
+          });
+
+          try {
+            const { data: hierarchyData } = await api.get<HierarchyTreeResponse>('/hierarchy/tree');
+            const hierarchyTree = Array.isArray(hierarchyData?.tree) ? hierarchyData.tree : [];
+            const hierarchySubordinates = collectHierarchySubordinateTokens(hierarchyTree, currentUserId);
+            hierarchySubordinates.forEach((token) => subordinateTokens.add(token));
+          } catch {
+            // Ignore hierarchy fallback errors and keep direct subordinate mapping only.
+          }
         }
 
         for (const project of projectsList) {
           const { data: stagesData } = await api.get<StageAPI[]>(`/projects/${project.id}/stages`);
           const stages = Array.isArray(stagesData) ? stagesData : [];
+          const currentUserRole = String(project.current_user_role || project.currentUserRole || '').toLowerCase();
+          const canManageProjectTasks = currentUserRole === 'owner' || currentUserRole === 'manager';
+          const normalizedCurrentUserId = normalizeToken(currentUserId);
 
           for (const stage of stages) {
             const { data: tasksData } = await api.get<TaskAPI[]>(`/stages/${stage.id}/tasks`);
@@ -546,12 +622,23 @@ export default function DashboardContent() {
 
               taskCards.push(taskCard);
 
-              if (subordinateIds.size > 0) {
-                const assignees = unpackTaskBlocks(task.blocks).assignees;
-                const hasSubordinateAssignee = assignees.some((id) => subordinateIds.has(id));
-                if (hasSubordinateAssignee) {
-                  subordinateTaskCards.push(taskCard);
-                }
+              const taskAssigneesFromBlocks = unpackTaskBlocks(task.blocks).assignees;
+              const taskAssigneesFromField = Array.isArray(task.assignees)
+                ? task.assignees.map((item) => String(item || '').trim()).filter(Boolean)
+                : [];
+              const normalizedTaskAssignees = [...taskAssigneesFromBlocks, ...taskAssigneesFromField]
+                .map((item) => normalizeToken(item))
+                .filter(Boolean);
+
+              const hasSubordinateAssignee = subordinateTokens.size > 0
+                && normalizedTaskAssignees.some((token) => subordinateTokens.has(token));
+
+              const hasDelegatedAssignee = canManageProjectTasks
+                && normalizedTaskAssignees.length > 0
+                && normalizedTaskAssignees.some((token) => token !== normalizedCurrentUserId);
+
+              if (hasSubordinateAssignee || hasDelegatedAssignee) {
+                subordinateTaskCards.push(taskCard);
               }
             });
           }

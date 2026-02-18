@@ -23,8 +23,10 @@ type AuthResponse = {
 type UserResponse = {
   id: string;
   email: string;
-  role: string;
+  role?: string | null;
   manager_id?: string | null;
+  department_id?: string | null;
+  department_name?: string | null;
   created_at: string;
 };
 

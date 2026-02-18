@@ -1,6 +1,99 @@
+"use client";
+
 import { Plus, Lightbulb } from 'lucide-react';
+import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { api, getApiErrorMessage } from '@/lib/api';
+import { AI_CONTEXT_UPDATED_EVENT, loadAIProjectContext, saveAIProjectContext } from '@/lib/ai-context';
+
+type ImportResponse = {
+  parsedProject?: {
+    title?: string;
+    description?: string;
+    deadline?: string;
+    phases?: Array<{
+      name?: string;
+      tasks?: Array<{ name?: string }>;
+    }>;
+  };
+  sourceFileName?: string;
+  summary?: {
+    title?: string;
+    stagesCount?: number;
+    tasksCount?: number;
+    deadline?: string;
+  };
+};
 
 export default function Sidebar() {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [selectedFileName, setSelectedFileName] = useState<string | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+
+  useEffect(() => {
+    const syncContext = () => {
+      const existing = loadAIProjectContext();
+      setSelectedFileName(existing?.sourceFileName || null);
+    };
+
+    syncContext();
+    window.addEventListener(AI_CONTEXT_UPDATED_EVENT, syncContext as EventListener);
+    return () => {
+      window.removeEventListener(AI_CONTEXT_UPDATED_EVENT, syncContext as EventListener);
+    };
+  }, []);
+
+  const handleSelectContextFile = () => {
+    if (isImporting) return;
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    setSelectedFileName(file.name);
+    setImportError(null);
+    setImportSuccess(null);
+    setIsImporting(true);
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const { data } = await api.post<ImportResponse>("/zhcp/parse-context", formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      });
+
+      if (data?.parsedProject) {
+        saveAIProjectContext({
+          projectTitle: data.summary?.title?.trim() || data.parsedProject?.title?.trim() || 'Новый проект',
+          deadline: data.summary?.deadline || data.parsedProject?.deadline,
+          stagesCreated: data.summary?.stagesCount ?? data.parsedProject?.phases?.length ?? 0,
+          tasksCreated: data.summary?.tasksCount ?? 0,
+          sourceFileName: data.sourceFileName || file.name,
+          importedAt: new Date().toISOString(),
+          parsedProject: data.parsedProject,
+          nextTaskCursor: 0,
+        });
+        setImportSuccess('Документ распарсен. Теперь в чате можно командами создать проект или задачи.');
+        return;
+      }
+
+      setImportError('Парсер не вернул ID проекта');
+    } catch (error) {
+      setImportError(getApiErrorMessage(error, 'Не удалось импортировать ЖЦП документ'));
+    } finally {
+      setIsImporting(false);
+      if (event.target) {
+        event.target.value = '';
+      }
+    }
+  };
+
   return (
     <aside className="w-64 border-r border-gray-200 dark:border-white/5 bg-white dark:bg-[#110027] p-6 transition-colors duration-300">
       {/* Context Section */}
@@ -9,7 +102,7 @@ export default function Sidebar() {
           <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-900 dark:text-white">
             КОНТЕКСТ
           </h3>
-          <span className="text-xs text-gray-500">0</span>
+          <span className="text-xs text-gray-500">{selectedFileName ? '1' : '0'}</span>
         </div>
 
         {/* Empty State */}
@@ -32,21 +125,43 @@ export default function Sidebar() {
             </div>
           </div>
           <p className="text-xs text-gray-600 dark:text-gray-400">
-            Добавьте проекты или файлы, чтобы AI лучше понимал задачу
+            {selectedFileName
+              ? `Файл: ${selectedFileName}`
+              : 'Добавьте проекты или файлы, чтобы AI лучше понимал задачу'}
           </p>
         </div>
 
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".pdf,.docx,.txt"
+          onChange={handleFileChange}
+          className="hidden"
+        />
+
         {/* Add Context Button */}
-        <button className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 dark:border-white/10 bg-white dark:bg-transparent py-2 text-sm font-medium text-gray-700 dark:text-white hover:bg-gray-50 dark:hover:bg-white/5 transition-colors">
+        <button
+          type="button"
+          onClick={handleSelectContextFile}
+          disabled={isImporting}
+          className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg border border-gray-300 dark:border-white/10 bg-white dark:bg-transparent py-2 text-sm font-medium text-gray-700 dark:text-white hover:bg-gray-50 dark:hover:bg-white/5 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+        >
           <Plus size={16} />
-          Добавить контекст
+          {isImporting ? 'Импорт...' : 'Добавить контекст'}
         </button>
+
+        {importError && (
+          <p className="mt-2 text-[11px] text-red-600 dark:text-red-400">{importError}</p>
+        )}
+        {importSuccess && (
+          <p className="mt-2 text-[11px] text-emerald-600 dark:text-emerald-400">{importSuccess}</p>
+        )}
       </div>
 
       {/* Tip Section */}
       <div className="mt-8 border-t border-gray-200 dark:border-white/5 pt-6 transition-colors">
         <div className="flex gap-3">
-          <div className="mt-0.5 flex-shrink-0">
+          <div className="mt-0.5 shrink-0">
             <Lightbulb size={18} className="text-blue-500" />
           </div>
           <div>

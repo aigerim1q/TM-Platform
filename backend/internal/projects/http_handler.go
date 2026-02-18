@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"tm-platform-backend/internal/auth"
+	"tm-platform-backend/internal/notifications"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -133,11 +135,71 @@ func derefOrEmpty(value *string) string {
 }
 
 type HTTPHandler struct {
-	repo *Repository
+	repo              *Repository
+	notificationsRepo *notifications.Repository
 }
 
-func NewHTTPHandler(repo *Repository) *HTTPHandler {
-	return &HTTPHandler{repo: repo}
+func NewHTTPHandler(repo *Repository, notificationsRepo *notifications.Repository) *HTTPHandler {
+	return &HTTPHandler{repo: repo, notificationsRepo: notificationsRepo}
+}
+
+func (h *HTTPHandler) notifyUsers(ctx context.Context, userIDs []uuid.UUID, actorID uuid.UUID, kind notifications.Kind, title, body, link, entityType string, entityID *uuid.UUID) {
+	if h.notificationsRepo == nil {
+		return
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		if userID == uuid.Nil || userID == actorID {
+			continue
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+
+		var actor *uuid.UUID
+		if actorID != uuid.Nil {
+			actor = &actorID
+		}
+		if err := h.notificationsRepo.Create(ctx, userID, actor, kind, title, body, link, entityType, entityID); err != nil {
+			log.Printf("notification create failed: %v", err)
+		}
+	}
+}
+
+func (h *HTTPHandler) resolveAssigneeUserIDs(members []ProjectMemberResponse, assignees map[string]struct{}) []uuid.UUID {
+	if len(assignees) == 0 || len(members) == 0 {
+		return nil
+	}
+
+	ids := make([]uuid.UUID, 0)
+	for _, member := range members {
+		idRef := strings.ToLower(strings.TrimSpace(member.User.ID.String()))
+		emailRef := strings.ToLower(strings.TrimSpace(member.User.Email))
+		if _, ok := assignees[idRef]; ok {
+			ids = append(ids, member.User.ID)
+			continue
+		}
+		if emailRef != "" {
+			if _, ok := assignees[emailRef]; ok {
+				ids = append(ids, member.User.ID)
+			}
+		}
+	}
+
+	return ids
+}
+
+func roleTitle(role ProjectMemberRole) string {
+	switch role {
+	case ProjectMemberRoleOwner:
+		return "Владелец"
+	case ProjectMemberRoleManager:
+		return "Менеджер"
+	default:
+		return "Участник"
+	}
 }
 
 func (h *HTTPHandler) RequireEditAccess(projectIDParam string) func(http.Handler) http.Handler {
@@ -348,6 +410,18 @@ func (h *HTTPHandler) CreateProject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create project"})
 		return
 	}
+
+	h.notifyUsers(
+		r.Context(),
+		[]uuid.UUID{userID},
+		uuid.Nil,
+		notifications.KindProjectCreated,
+		"Проект создан",
+		"Вы успешно создали новый проект: "+project.Title,
+		"/project-overview/"+project.ID.String(),
+		"project",
+		&project.ID,
+	)
 
 	writeJSON(w, http.StatusCreated, project.Response())
 }
@@ -840,6 +914,25 @@ func (h *HTTPHandler) CreateTaskComment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	members, membersErr := h.repo.ListMembersByProject(r.Context(), requesterID, comment.ProjectID)
+	if membersErr == nil {
+		targets := make([]uuid.UUID, 0, len(members))
+		for _, member := range members {
+			targets = append(targets, member.User.ID)
+		}
+		h.notifyUsers(
+			r.Context(),
+			targets,
+			requesterID,
+			notifications.KindTaskComment,
+			"Новый комментарий в задаче",
+			"В задаче появился новый комментарий",
+			"/project/task-"+comment.TaskID.String(),
+			"task",
+			&comment.TaskID,
+		)
+	}
+
 	writeJSON(w, http.StatusCreated, comment)
 }
 
@@ -1020,6 +1113,46 @@ func (h *HTTPHandler) UpdateRoles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	projectTitle := ""
+	if projectItem, getErr := h.repo.GetByID(r.Context(), requesterID, projectID); getErr == nil {
+		projectTitle = strings.TrimSpace(projectItem.Title)
+	}
+	projectTitlePart := ""
+	if projectTitle != "" {
+		projectTitlePart = " в проекте «" + projectTitle + "»"
+	}
+
+	h.notifyUsers(
+		r.Context(),
+		[]uuid.UUID{managerID},
+		requesterID,
+		notifications.KindProjectMember,
+		"Обновлены роли в проекте",
+		"Вам назначена роль: "+roleTitle(ProjectMemberRoleManager)+projectTitlePart,
+		"/project-overview/"+projectID.String(),
+		"project",
+		&projectID,
+	)
+
+	memberTargets := make([]uuid.UUID, 0, len(memberIDs))
+	for _, memberID := range memberIDs {
+		if memberID == managerID {
+			continue
+		}
+		memberTargets = append(memberTargets, memberID)
+	}
+	h.notifyUsers(
+		r.Context(),
+		memberTargets,
+		requesterID,
+		notifications.KindProjectMember,
+		"Обновлены роли в проекте",
+		"Вам назначена роль: "+roleTitle(ProjectMemberRoleMember)+projectTitlePart,
+		"/project-overview/"+projectID.String(),
+		"project",
+		&projectID,
+	)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -1077,6 +1210,18 @@ func (h *HTTPHandler) UpsertMember(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save member"})
 		return
 	}
+
+	h.notifyUsers(
+		r.Context(),
+		[]uuid.UUID{memberUserID},
+		requesterID,
+		notifications.KindProjectMember,
+		"Вы добавлены в проект",
+		"Вам назначена роль: "+roleTitle(role),
+		"/project-overview/"+projectID.String(),
+		"project",
+		&projectID,
+	)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -1507,6 +1652,8 @@ func (h *HTTPHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if len(blocks) == 0 || string(blocks) == "null" {
 		blocks = json.RawMessage("[]")
 	}
+	oldAssignees := assigneesFromBlocks(currentTask.Blocks)
+	newAssignees := assigneesFromBlocks(blocks)
 
 	task, err := h.repo.UpdateTask(r.Context(), userID, taskID, title, status, startDate, deadline, stageID, orderIndex, blocks)
 	if err != nil {
@@ -1517,6 +1664,33 @@ func (h *HTTPHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		log.Printf("UpdateTask failed: %v", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to update task"})
 		return
+	}
+
+	if len(newAssignees) > 0 {
+		addedAssignees := make(map[string]struct{}, len(newAssignees))
+		for value := range newAssignees {
+			if _, already := oldAssignees[value]; !already {
+				addedAssignees[value] = struct{}{}
+			}
+		}
+
+		if len(addedAssignees) > 0 {
+			members, membersErr := h.repo.ListMembersByProject(r.Context(), userID, task.ProjectID)
+			if membersErr == nil {
+				targetIDs := h.resolveAssigneeUserIDs(members, addedAssignees)
+				h.notifyUsers(
+					r.Context(),
+					targetIDs,
+					userID,
+					notifications.KindTaskDelegated,
+					"Вам делегирована задача",
+					"Вам назначена задача: "+task.Title,
+					"/project/task-"+task.ID.String(),
+					"task",
+					&task.ID,
+				)
+			}
+		}
 	}
 
 	writeJSON(w, http.StatusOK, task)

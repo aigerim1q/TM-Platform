@@ -1,7 +1,7 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
 import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -46,6 +46,11 @@ type ProjectPageResponse = {
   title: string;
   blocks?: unknown;
   blocks_json?: unknown;
+};
+
+type ProjectPageListItem = {
+  id: string;
+  title: string;
 };
 
 type SlashCommandType = 'image' | 'video' | 'file' | 'page' | 'subtask';
@@ -130,6 +135,7 @@ function ensureTrailingTextBlock(currentBlocks: EditorBlock[]) {
 
 export default function TaskEditor({ taskId }: { taskId: string }) {
   const router = useRouter();
+  const pathname = usePathname();
 
   const [isLoadingTask, setIsLoadingTask] = useState(true);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -166,6 +172,32 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
 
   const blockRefs = useRef<{ [key: string]: HTMLElement | null }>({});
   const slashMenuRef = useRef<HTMLDivElement | null>(null);
+
+  const applyPageTitlesToBlocks = useCallback((prev: EditorBlock[], titlesMap: Map<string, string>) => {
+    if (!Array.isArray(prev) || prev.length === 0 || titlesMap.size === 0) {
+      return prev;
+    }
+
+    let changed = false;
+    const next = prev.map((block) => {
+      if (block.type !== 'page' || !block.pageId) {
+        return block;
+      }
+
+      const nextTitle = titlesMap.get(String(block.pageId));
+      if (!nextTitle || nextTitle === block.content) {
+        return block;
+      }
+
+      changed = true;
+      return {
+        ...block,
+        content: nextTitle,
+      };
+    });
+
+    return changed ? next : prev;
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,6 +326,46 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
     };
   }, [selectedProjectId, selectedStageId]);
 
+  useEffect(() => {
+    if (!projectId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const syncPageTitles = async () => {
+      try {
+        const { data } = await api.get<ProjectPageListItem[]>(`/projects/${projectId}/pages`);
+        if (cancelled || !Array.isArray(data) || data.length === 0) {
+          return;
+        }
+
+        const titlesMap = new Map<string, string>();
+        data.forEach((page) => {
+          if (!page?.id) {
+            return;
+          }
+          const normalizedTitle = String(page.title || 'Новая страница').trim() || 'Новая страница';
+          titlesMap.set(String(page.id), normalizedTitle);
+        });
+
+        if (titlesMap.size === 0) {
+          return;
+        }
+
+        setBlocks((prev) => ensureTrailingTextBlock(applyPageTitlesToBlocks(prev, titlesMap)));
+      } catch {
+        // no-op: keep editor usable even if page title sync request fails
+      }
+    };
+
+    void syncPageTitles();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applyPageTitlesToBlocks, projectId]);
+
   const autosaveBlocks = useMemo(() => packTaskBlocks(blocks, assignees), [blocks, assignees]);
 
   const { saveStatus, saveError: autosaveError } = useAutosave({
@@ -384,6 +456,12 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
     setSlashIndex(0);
     setSlashBlockId(null);
   };
+
+  const buildPageEditorUrl = useCallback((targetProjectId: string, pageId: string) => {
+    const returnTo = (pathname && pathname.startsWith('/')) ? pathname : `/tasks/${taskId}/edit`;
+    const params = new URLSearchParams({ returnTo });
+    return `/project/${targetProjectId}/editor/page/${pageId}?${params.toString()}`;
+  }, [pathname, taskId]);
 
   useEffect(() => {
     if (!slashOpen) return;
@@ -488,7 +566,7 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
     }
 
     if (block.pageId && projectId) {
-      router.push(`/project/${projectId}/editor/page/${block.pageId}`);
+      router.push(buildPageEditorUrl(projectId, block.pageId));
       return;
     }
 
@@ -506,6 +584,11 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
     }
 
     const block = blocks.find((item) => item.id === blockId);
+    if (block?.pageId) {
+      router.push(buildPageEditorUrl(projectId, block.pageId));
+      return;
+    }
+
     const rawTitle = block?.content || '';
     const pageTitle = rawTitle.replace(/\/$/, '').trim() || 'Новая страница';
 
@@ -550,7 +633,7 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
         setTaskUpdatedAt(updatedAt);
       }
 
-      router.push(`/project/${projectId}/editor/page/${data.id}`);
+      router.push(buildPageEditorUrl(projectId, data.id));
     } catch (error) {
       setSaveError(getApiErrorMessage(error, 'Не удалось создать страницу проекта из задачи'));
     }

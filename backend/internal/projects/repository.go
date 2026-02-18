@@ -647,10 +647,13 @@ func (r *Repository) CreateTask(ctx context.Context, ownerID, stageID uuid.UUID,
 	 		INSERT INTO stage_tasks (stage_id, title, status, start_date, deadline, order_index, blocks)
 	 		SELECT s.id, $2, $3, $4, $5, $6, '[]'::jsonb
 		 	FROM project_stages s
-		 	JOIN project_members pm ON pm.project_id = s.project_id
+		 	JOIN projects p ON p.id = s.project_id
+		 	LEFT JOIN project_members pm ON pm.project_id = s.project_id AND pm.user_id = $7
 		 	WHERE s.id = $1
-	 		  AND pm.user_id = $7
-		 	  AND pm.role IN ('owner', 'manager')
+		 	  AND (
+		 		p.owner_id = $7
+		 		OR pm.role IN ('owner', 'manager')
+		 	  )
 	 		RETURNING id, stage_id, title, status, start_date, deadline, order_index, blocks, updated_at
 		 )
 		 SELECT i.id, i.stage_id, s.project_id, i.title, i.status, i.start_date, i.deadline, i.order_index, i.blocks, i.updated_at
@@ -737,20 +740,26 @@ func (r *Repository) UpdateTask(ctx context.Context, ownerID, taskID uuid.UUID, 
 			 blocks = $7,
 			 updated_at = now()
 		 FROM project_stages s
-		 JOIN project_members pm ON pm.project_id = s.project_id
+		 JOIN projects p ON p.id = s.project_id
+		 LEFT JOIN project_members pm ON pm.project_id = s.project_id AND pm.user_id = $8
 		 WHERE t.id = $1
 		   AND s.id = t.stage_id
-		   AND pm.user_id = $8
-		   AND pm.role IN ('owner', 'manager')
+		   AND (
+			p.owner_id = $8
+			OR pm.role IN ('owner', 'manager')
+		   )
 		   AND (
 			 $9::uuid IS NULL
 			 OR EXISTS (
 				SELECT 1
 				FROM project_stages s_target
-				JOIN project_members pm_target ON pm_target.project_id = s_target.project_id
+				JOIN projects p_target ON p_target.id = s_target.project_id
+				LEFT JOIN project_members pm_target ON pm_target.project_id = s_target.project_id AND pm_target.user_id = $8
 				WHERE s_target.id = $9
-				  AND pm_target.user_id = $8
-				  AND pm_target.role IN ('owner', 'manager')
+				  AND (
+					p_target.owner_id = $8
+					OR pm_target.role IN ('owner', 'manager')
+				  )
 			 )
 		   )
 		 RETURNING t.id, t.stage_id, (SELECT project_id FROM project_stages WHERE id = t.stage_id), t.title, t.status, t.start_date, t.deadline, t.order_index, t.blocks, t.updated_at`,
@@ -772,12 +781,15 @@ func (r *Repository) DeleteTask(ctx context.Context, ownerID, taskID uuid.UUID) 
 	result, err := r.db.ExecContext(
 		ctx,
 		`DELETE FROM stage_tasks t
-		 USING project_stages s, project_members pm
+		 USING project_stages s, projects p
+		 LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
 		 WHERE t.id = $1
 		   AND s.id = t.stage_id
-		   AND pm.project_id = s.project_id
-		   AND pm.user_id = $2
-		   AND pm.role IN ('owner', 'manager')`,
+		   AND p.id = s.project_id
+		   AND (
+			p.owner_id = $2
+			OR pm.role IN ('owner', 'manager')
+		   )`,
 		taskID,
 		ownerID,
 	)
@@ -987,16 +999,39 @@ func (r *Repository) ListDelayReports(ctx context.Context, requesterID, projectI
 func (r *Repository) ListMembersByProject(ctx context.Context, requesterID, projectID uuid.UUID) ([]ProjectMemberResponse, error) {
 	rows, err := r.db.QueryContext(
 		ctx,
-		`SELECT u.id, u.email, pm.role
-		 FROM project_members pm
-		 JOIN users u ON u.id = pm.user_id
-		 WHERE pm.project_id = $1
-		   AND EXISTS (
-		 	SELECT 1
-		 	FROM project_members me
-		 	WHERE me.project_id = pm.project_id AND me.user_id = $2
-		   )
-		 ORDER BY pm.created_at ASC`,
+		`WITH access AS (
+			SELECT 1
+			FROM projects p
+			WHERE p.id = $1
+			  AND (
+				p.owner_id = $2
+				OR EXISTS (
+					SELECT 1
+					FROM project_members me
+					WHERE me.project_id = p.id AND me.user_id = $2
+				)
+			  )
+		), members AS (
+			SELECT u.id, u.email, pm.role, pm.created_at
+			FROM project_members pm
+			JOIN users u ON u.id = pm.user_id
+			WHERE pm.project_id = $1
+			UNION ALL
+			SELECT u_owner.id, u_owner.email, 'owner'::text, p.created_at
+			FROM projects p
+			JOIN users u_owner ON u_owner.id = p.owner_id
+			WHERE p.id = $1
+			  AND NOT EXISTS (
+				SELECT 1
+				FROM project_members pm_owner
+				WHERE pm_owner.project_id = p.id
+				  AND pm_owner.user_id = p.owner_id
+			  )
+		)
+		SELECT m.id, m.email, m.role
+		FROM members m
+		WHERE EXISTS (SELECT 1 FROM access)
+		ORDER BY m.created_at ASC, m.email ASC`,
 		projectID,
 		requesterID,
 	)
@@ -1029,9 +1064,14 @@ func (r *Repository) UpsertMember(ctx context.Context, requesterID, projectID, u
 		`INSERT INTO project_members (project_id, user_id, role)
 		 SELECT $1, $2, $3
 		 WHERE EXISTS (
-		 	SELECT 1
-		 	FROM project_members me
-		 	WHERE me.project_id = $1 AND me.user_id = $4 AND me.role IN ('owner', 'manager')
+			SELECT 1
+			FROM projects p
+			LEFT JOIN project_members me ON me.project_id = p.id AND me.user_id = $4
+			WHERE p.id = $1
+			  AND (
+				p.owner_id = $4
+				OR me.role IN ('owner', 'manager')
+			  )
 		 )
 		 ON CONFLICT (project_id, user_id) DO UPDATE
 		 SET role = EXCLUDED.role`,
@@ -1066,10 +1106,13 @@ func (r *Repository) UpdateRoles(ctx context.Context, requesterID, projectID, ma
 	if err := tx.QueryRowContext(
 		ctx,
 		`SELECT 1
-		 FROM project_members pm
-		 WHERE pm.project_id = $1
-		   AND pm.user_id = $2
-		   AND pm.role IN ('owner', 'manager')`,
+		 FROM projects p
+		 LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.user_id = $2
+		 WHERE p.id = $1
+		   AND (
+			p.owner_id = $2
+			OR pm.role IN ('owner', 'manager')
+		   )`,
 		projectID,
 		requesterID,
 	).Scan(&accessGranted); err != nil {

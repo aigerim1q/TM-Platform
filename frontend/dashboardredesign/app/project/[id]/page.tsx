@@ -2,13 +2,13 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { ChevronRight, Clock, Users, AlertCircle, Send, Share2, Copy, X, Search, UserPlus, Calendar, ChevronDown, Paperclip, Star } from 'lucide-react';
+import { ChevronRight, Clock, Users, AlertCircle, Send, Share2, Copy, X, Search, UserPlus, Calendar, ChevronDown, Paperclip, Star, Check } from 'lucide-react';
 import Header from '@/components/header';
 import ResponsiblePersonsModal from '@/components/responsible-persons-modal';
 import DelayReportsModal from '@/components/delay-reports-modal';
 import { api, getApiErrorMessage, getApiStatus, getCurrentUserId } from '@/lib/api';
 import { packTaskBlocks, unpackTaskBlocks, type EditorBlock } from '@/components/editor/taskBlockMeta';
-import { getDisplayNameFromEmail } from '@/lib/utils';
+import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
 
 type TaskResponse = {
   id: string;
@@ -138,6 +138,9 @@ export default function TaskDetail() {
   const [isAssigneeModalOpen, setIsAssigneeModalOpen] = useState(false);
   const [assigneeSelection, setAssigneeSelection] = useState<string[]>([]);
   const [isSavingAssignees, setIsSavingAssignees] = useState(false);
+  const [allUsers, setAllUsers] = useState<{ id: string; email: string }[]>([]);
+  const [isAddingMember, setIsAddingMember] = useState(false);
+  const [memberSearchQuery, setMemberSearchQuery] = useState('');
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isTaskNotFound, setIsTaskNotFound] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
@@ -255,11 +258,15 @@ export default function TaskDetail() {
 
     const loadMembers = async () => {
       try {
-        const { data } = await api.get<ProjectMemberEntity[]>(`/projects/${task.project_id}/members`);
+        const [{ data: membersData }, { data: usersData }] = await Promise.all([
+          api.get<ProjectMemberEntity[]>(`/projects/${task.project_id}/members`),
+          api.get<{ id: string; email: string }[]>('/users'),
+        ]);
         if (cancelled) {
           return;
         }
-        setProjectMembers(Array.isArray(data) ? data : []);
+        setProjectMembers(Array.isArray(membersData) ? membersData : []);
+        setAllUsers(Array.isArray(usersData) ? usersData : []);
       } catch {
         if (!cancelled) {
           setProjectMembers([]);
@@ -347,6 +354,35 @@ export default function TaskDetail() {
       return [...prev, memberId];
     });
   };
+
+  const handleAddProjectMember = async (userId: string) => {
+    if (!task?.project_id || isAddingMember) return;
+    setIsAddingMember(true);
+    setTaskError(null);
+    try {
+      await api.post(`/projects/${task.project_id}/members`, {
+        userId,
+        role: 'member',
+      });
+      const { data: membersData } = await api.get<ProjectMemberEntity[]>(
+        `/projects/${task.project_id}/members`
+      );
+      setProjectMembers(Array.isArray(membersData) ? membersData : []);
+      setMemberSearchQuery('');
+    } catch (error) {
+      setTaskError(getApiErrorMessage(error, 'Не удалось добавить участника'));
+    } finally {
+      setIsAddingMember(false);
+    }
+  };
+
+  const nonMemberUsers = useMemo(() => {
+    const memberIds = new Set(projectMembers.map((m) => m.user.id));
+    return allUsers.filter(
+      (u) => !memberIds.has(u.id) &&
+        getDisplayNameFromEmail(u.email).toLowerCase().includes(memberSearchQuery.toLowerCase())
+    );
+  }, [allUsers, projectMembers, memberSearchQuery]);
 
   const saveTaskAssignees = async () => {
     if (!task || isSavingAssignees) {
@@ -466,6 +502,31 @@ export default function TaskDetail() {
       .filter((block) => block.type === 'text')
       .map((block) => String(block.content || '').trim())
       .filter(Boolean);
+  }, [isTaskPage, taskBlocks]);
+
+  const dynamicPreparationMedia = useMemo(() => {
+    if (!isTaskPage) {
+      return [] as Array<{
+        id: string;
+        type: 'image' | 'video' | 'file';
+        url: string;
+        fileName: string;
+      }>;
+    }
+
+    return taskBlocks
+      .filter((block) => block.type === 'image' || block.type === 'video' || block.type === 'file')
+      .map((block) => {
+        const rawUrl = String(block.fileUrl || block.content || '').trim();
+        const resolvedUrl = getFileUrl(rawUrl) || rawUrl;
+        return {
+          id: block.id,
+          type: block.type,
+          url: resolvedUrl,
+          fileName: String(block.fileName || 'Вложение').trim() || 'Вложение',
+        };
+      })
+      .filter((item) => Boolean(item.url));
   }, [isTaskPage, taskBlocks]);
 
   const dynamicStages = useMemo<TaskViewStage[]>(() => {
@@ -844,13 +905,60 @@ export default function TaskDetail() {
             {/* Preparation Section */}
             <div className="mb-8">
               <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Подготовка</h2>
-              <ul className="space-y-2">
-                {displayTaskData.preparation.map((item, idx) => (
-                  <li key={idx} className={`text-sm ${idx === 1 ? 'bg-yellow-200 dark:bg-yellow-900/50 px-3 py-2 rounded' : ''} text-gray-700 dark:text-gray-300`}>
-                    • {item}
-                  </li>
-                ))}
-              </ul>
+              {displayTaskData.preparation.length > 0 ? (
+                <ul className="space-y-2">
+                  {displayTaskData.preparation.map((item, idx) => (
+                    <li key={idx} className="text-sm text-gray-700 dark:text-gray-300">
+                      • {item}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-gray-500 dark:text-gray-400">Пока нет текстовых заметок</p>
+              )}
+
+              {isTaskPage && dynamicPreparationMedia.length > 0 && (
+                <div className="mt-5 space-y-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Вложения из редактора</p>
+                  <div className="space-y-3">
+                    {dynamicPreparationMedia.map((item) => {
+                      if (item.type === 'image') {
+                        return (
+                          <img
+                            key={item.id}
+                            src={item.url}
+                            alt={item.fileName}
+                            className="w-full max-h-80 rounded-xl object-cover border border-gray-200 dark:border-gray-700"
+                          />
+                        );
+                      }
+
+                      if (item.type === 'video') {
+                        return (
+                          <video
+                            key={item.id}
+                            src={item.url}
+                            controls
+                            className="w-full max-h-80 rounded-xl border border-gray-200 dark:border-gray-700"
+                          />
+                        );
+                      }
+
+                      return (
+                        <a
+                          key={item.id}
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-2 text-sm font-medium text-amber-600 hover:text-amber-700 hover:underline"
+                        >
+                          📎 {item.fileName}
+                        </a>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Stages Section */}
@@ -1008,8 +1116,12 @@ export default function TaskDetail() {
                       </button>
                     </div>
                     <div className="flex gap-4 px-4">
-                      <button className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1">
-                        📎 Файл
+                      <button
+                        type="button"
+                        onClick={() => router.push('/documents')}
+                        className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1"
+                      >
+                        📄 Документы
                       </button>
                       <button className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1">
                         📷 Фото
@@ -1191,7 +1303,39 @@ export default function TaskDetail() {
                         </div>
                       </div>
                     ))}
+
+                    {filteredMembers.length === 0 && (
+                      <p className="py-4 text-center text-sm text-gray-500">
+                        {projectMembers.length <= 1
+                          ? 'Добавьте участников проекта, чтобы делегировать задачу'
+                          : 'Нет совпадений'}
+                      </p>
+                    )}
                   </div>
+
+                  {/* Add member inline for delegation */}
+                  {canInviteToTask && nonMemberUsers.length > 0 && (
+                    <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3">
+                      <p className="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
+                        <UserPlus className="h-3.5 w-3.5" />
+                        Добавить участника в проект
+                      </p>
+                      <div className="max-h-32 space-y-1 overflow-y-auto">
+                        {nonMemberUsers.slice(0, 5).map((user) => (
+                          <button
+                            key={user.id}
+                            type="button"
+                            disabled={isAddingMember}
+                            onClick={() => void handleAddProjectMember(user.id)}
+                            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+                          >
+                            <span className="font-medium text-gray-700 dark:text-gray-300">{getDisplayNameFromEmail(user.email)}</span>
+                            <span className="text-xs text-amber-600 font-semibold">+ Добавить</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1243,7 +1387,7 @@ export default function TaskDetail() {
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h3 className="text-xl font-bold text-gray-900 dark:text-white">Ответственные по задаче</h3>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Владелец может назначить участников задачи</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Выберите участников проекта для назначения на задачу</p>
                 </div>
                 <button
                   type="button"
@@ -1255,7 +1399,8 @@ export default function TaskDetail() {
                 </button>
               </div>
 
-              <div className="mb-4 max-h-80 space-y-2 overflow-y-auto">
+              {/* Existing project members — toggle as assignees */}
+              <div className="mb-2 max-h-60 space-y-2 overflow-y-auto">
                 {projectMembers.map((member) => {
                   const isSelected = assigneeSelection.includes(member.user.id);
                   return (
@@ -1270,17 +1415,59 @@ export default function TaskDetail() {
                     >
                       <div>
                         <p className="font-semibold text-gray-900 dark:text-white">{getDisplayNameFromEmail(member.user.email)}</p>
-                        <p className="text-xs text-gray-500">{member.role}</p>
+                        <p className="text-xs text-gray-500">{getRoleLabel(member.role)}</p>
                       </div>
-                      <div className={`h-5 w-5 rounded-full border-2 ${isSelected ? 'border-amber-500 bg-amber-500' : 'border-gray-300'}`} />
+                      <div className={`h-5 w-5 rounded-full border-2 flex items-center justify-center ${isSelected ? 'border-amber-500 bg-amber-500' : 'border-gray-300'}`}>
+                        {isSelected && <Check className="h-3 w-3 text-white" />}
+                      </div>
                     </button>
                   );
                 })}
 
                 {projectMembers.length === 0 && (
-                  <p className="text-sm text-gray-500">Нет участников проекта для назначения</p>
+                  <p className="py-4 text-center text-sm text-gray-500">Нет участников проекта для назначения</p>
                 )}
               </div>
+
+              {/* Add new project members section */}
+              {canInviteToTask && (
+                <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
+                  <p className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
+                    <UserPlus className="h-4 w-4" />
+                    Добавить участника в проект
+                  </p>
+                  <div className="relative mb-2">
+                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+                    <input
+                      type="text"
+                      value={memberSearchQuery}
+                      onChange={(e) => setMemberSearchQuery(e.target.value)}
+                      placeholder="Поиск пользователей..."
+                      className="w-full rounded-xl border border-gray-200 bg-gray-50 py-2.5 pl-9 pr-4 text-sm text-gray-900 placeholder-gray-400 dark:border-gray-700 dark:bg-gray-800 dark:text-white dark:placeholder-gray-500"
+                    />
+                  </div>
+                  <div className="max-h-40 space-y-1 overflow-y-auto">
+                    {nonMemberUsers.slice(0, 10).map((user) => (
+                      <button
+                        key={user.id}
+                        type="button"
+                        disabled={isAddingMember}
+                        onClick={() => void handleAddProjectMember(user.id)}
+                        className="flex w-full items-center justify-between rounded-xl px-4 py-2.5 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
+                      >
+                        <span className="font-medium text-gray-900 dark:text-white">{getDisplayNameFromEmail(user.email)}</span>
+                        <span className="text-xs text-amber-600 font-semibold">+ Добавить</span>
+                      </button>
+                    ))}
+                    {memberSearchQuery && nonMemberUsers.length === 0 && (
+                      <p className="py-2 text-center text-xs text-gray-400">Пользователи не найдены</p>
+                    )}
+                    {!memberSearchQuery && nonMemberUsers.length === 0 && allUsers.length > 0 && (
+                      <p className="py-2 text-center text-xs text-gray-400">Все пользователи уже добавлены</p>
+                    )}
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end gap-3">
                 <button

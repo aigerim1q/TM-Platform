@@ -5,6 +5,18 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import ChatsDropdown from './chats-dropdown';
 import { useTheme } from 'next-themes';
+import { api } from '@/lib/api';
+import { getAccessToken, getCurrentUserId } from '@/lib/api';
+import { getChatUnreadCount, touchChatPresence } from '@/lib/chats';
+import { NOTIFICATIONS_UPDATED_EVENT } from '@/lib/notifications-events';
+import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
+
+type HeaderProfile = {
+  id: string;
+  full_name?: string | null;
+  avatar_url?: string | null;
+  email: string;
+};
 
 export default function Header() {
   const router = useRouter();
@@ -13,10 +25,153 @@ export default function Header() {
   const { theme, setTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [profile, setProfile] = useState<HeaderProfile | null>(null);
 
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const loadUnreadCount = async () => {
+      try {
+        const { data } = await api.get<{ count?: number }>('/notifications/unread-count');
+        if (!disposed) {
+          setUnreadCount(Number(data?.count || 0));
+        }
+      } catch {
+        if (!disposed) {
+          setUnreadCount(0);
+        }
+      }
+    };
+
+    void loadUnreadCount();
+    const timer = window.setInterval(loadUnreadCount, 3000);
+    const onFocus = () => {
+      void loadUnreadCount();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadUnreadCount();
+      }
+    };
+    const onNotificationsUpdated = () => {
+      void loadUnreadCount();
+    };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener(NOTIFICATIONS_UPDATED_EVENT, onNotificationsUpdated as EventListener);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener(NOTIFICATIONS_UPDATED_EVENT, onNotificationsUpdated as EventListener);
+    };
+  }, [pathname]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const loadChatUnreadCount = async () => {
+      if (!getAccessToken()) {
+        if (!disposed) setChatUnreadCount(0);
+        return;
+      }
+
+      try {
+        const count = await getChatUnreadCount();
+        if (!disposed) {
+          setChatUnreadCount(count);
+        }
+      } catch {
+        if (!disposed) {
+          setChatUnreadCount(0);
+        }
+      }
+    };
+
+    void loadChatUnreadCount();
+    const timer = window.setInterval(loadChatUnreadCount, 3000);
+    const onFocus = () => {
+      void loadChatUnreadCount();
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadChatUnreadCount();
+      }
+    };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!getAccessToken()) return;
+
+    const ping = () => {
+      touchChatPresence().catch(() => {
+        // ignore transient network/auth failures
+      });
+    };
+
+    ping();
+    const id = window.setInterval(ping, 25_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+
+    const loadProfile = async () => {
+      const currentUserId = getCurrentUserId();
+      if (!currentUserId) {
+        if (!disposed) {
+          setProfile(null);
+        }
+        return;
+      }
+
+      try {
+        const { data } = await api.get<HeaderProfile>(`/users/${currentUserId}`);
+        if (!disposed) {
+          setProfile(data);
+        }
+      } catch {
+        if (!disposed) {
+          setProfile(null);
+        }
+      }
+    };
+
+    void loadProfile();
+    const onProfileUpdated = () => {
+      void loadProfile();
+    };
+    window.addEventListener('tm-profile-updated', onProfileUpdated as EventListener);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener('tm-profile-updated', onProfileUpdated as EventListener);
+    };
+  }, [pathname]);
+
+  const profileName = profile?.full_name?.trim() || getDisplayNameFromEmail(profile?.email);
+  const profileAvatar = getFileUrl(profile?.avatar_url) || profile?.avatar_url || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80';
+  const profileEmail = profile?.email || 'user@example.com';
 
   const isLifecyclePage = pathname === '/lifecycle';
   const isDashboard = pathname === '/dashboard' || pathname === '/';
@@ -35,12 +190,30 @@ export default function Header() {
     closeMobileMenu();
   };
 
+  const handleLogoClick = () => {
+    closeMobileMenu();
+    router.push('/dashboard');
+    router.refresh();
+  };
+
+  const handleProfileClick = () => {
+    const currentUserId = getCurrentUserId();
+    closeMobileMenu();
+
+    if (currentUserId) {
+      router.push(`/users/${currentUserId}`);
+      return;
+    }
+
+    router.push('/dashboard');
+  };
+
   return (
     <>
       <div className="fixed top-6 left-0 right-0 z-50 flex justify-center pointer-events-none px-4">
         <header className="pointer-events-auto inline-flex items-center justify-between w-full max-w-5xl gap-4 rounded-full border border-white/30 bg-white/40 dark:bg-black/40 backdrop-blur-3xl px-6 py-3 shadow-[0_15px_40px_rgba(215,185,145,0.25)] dark:shadow-[0_15px_40px_rgba(0,0,0,0.5)] ring-1 ring-black/5 dark:ring-white/10 transition-all hover:bg-white/50 dark:hover:bg-black/60 md:w-auto md:justify-start md:gap-8">
           {/* Logo */}
-          <div className="flex items-center gap-1.5 grayscale-[0.2] hover:grayscale-0 transition-all cursor-pointer" onClick={() => router.push('/')}>
+          <div className="flex items-center gap-1.5 grayscale-[0.2] hover:grayscale-0 transition-all cursor-pointer" onClick={handleLogoClick}>
             <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-400 font-bold text-white text-[10px] shadow-sm">
               THE-
             </div>
@@ -79,9 +252,14 @@ export default function Header() {
           <div className="hidden md:flex items-center gap-4 relative">
             <button
               onClick={() => router.push('/notifications')}
-              className={`hover:text-amber-600 transition-colors ${pathname === '/notifications' ? 'text-amber-500' : 'text-gray-500 dark:text-white'}`}
+              className={`relative hover:text-amber-600 transition-colors ${pathname === '/notifications' ? 'text-amber-500' : 'text-gray-500 dark:text-white'}`}
             >
               <Bell size={22} fill={pathname === '/notifications' ? "currentColor" : "none"} />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1.5 -right-2 inline-flex min-w-4.5 h-4.5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              )}
             </button>
 
             <div className="relative">
@@ -90,7 +268,11 @@ export default function Header() {
                 className={`relative hover:text-gray-700 dark:hover:text-white transition-all ${pathname.startsWith('/chats') || isChatsOpen ? 'text-amber-500 dark:text-[#7c3aed] scale-110' : 'text-gray-500 dark:text-white'}`}
               >
                 <MessageCircle size={24} fill={pathname.startsWith('/chats') || isChatsOpen ? "currentColor" : "none"} />
-                <span className={`absolute -top-1 -right-1 h-3.5 w-3.5 rounded-full border-2 border-white dark:border-black ${pathname.startsWith('/chats') || isChatsOpen ? 'bg-red-500 dark:bg-[#7c3aed]' : 'bg-red-500'}`} />
+                {chatUnreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-2 inline-flex min-w-4.5 h-4.5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                    {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+                  </span>
+                )}
               </button>
 
               <ChatsDropdown isOpen={isChatsOpen} onClose={() => setIsChatsOpen(false)} />
@@ -129,9 +311,12 @@ export default function Header() {
               )}
               {!mounted && <Moon size={22} />}
             </button>
-            <button className="h-9 w-9 overflow-hidden rounded-full ring-2 ring-transparent hover:ring-gray-200 transition-all">
+            <button
+              onClick={handleProfileClick}
+              className="h-9 w-9 overflow-hidden rounded-full ring-2 ring-transparent hover:ring-gray-200 transition-all"
+            >
               <img
-                src="https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
+                src={profileAvatar}
                 alt="User avatar"
                 className="h-full w-full object-cover"
               />
@@ -141,11 +326,27 @@ export default function Header() {
           {/* Mobile Menu Button */}
           <div className="flex md:hidden items-center gap-3">
             <button
+              onClick={() => router.push('/notifications')}
+              className={`relative hover:text-amber-600 transition-colors ${pathname === '/notifications' ? 'text-amber-500' : 'text-gray-500 dark:text-white'}`}
+            >
+              <Bell size={22} fill={pathname === '/notifications' ? "currentColor" : "none"} />
+              {unreadCount > 0 && (
+                <span className="absolute -top-1.5 -right-2 inline-flex min-w-4.5 h-4.5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                  {unreadCount > 99 ? '99+' : unreadCount}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => setIsChatsOpen(!isChatsOpen)}
               className={`relative hover:text-gray-700 dark:hover:text-white transition-all ${pathname.startsWith('/chats') || isChatsOpen ? 'text-amber-500 dark:text-[#7c3aed]' : 'text-gray-500 dark:text-white'}`}
             >
               <MessageCircle size={24} fill={pathname.startsWith('/chats') || isChatsOpen ? "currentColor" : "none"} />
-              <span className={`absolute -top-1 -right-1 h-3.5 w-3.5 rounded-full border-2 border-white dark:border-black ${pathname.startsWith('/chats') || isChatsOpen ? 'bg-red-500 dark:bg-[#7c3aed]' : 'bg-red-500'}`} />
+              {chatUnreadCount > 0 && (
+                <span className="absolute -top-1.5 -right-2 inline-flex min-w-4.5 h-4.5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                  {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+                </span>
+              )}
             </button>
             <ChatsDropdown isOpen={isChatsOpen} onClose={() => setIsChatsOpen(false)} />
 
@@ -161,9 +362,9 @@ export default function Header() {
 
       {/* Mobile Menu Overlay */}
       {isMobileMenuOpen && (
-        <div className="fixed inset-0 z-[60] bg-white dark:bg-black p-6 flex flex-col animate-in fade-in slide-in-from-bottom-10 duration-200">
+        <div className="fixed inset-0 z-60 bg-white dark:bg-black p-6 flex flex-col animate-in fade-in slide-in-from-bottom-10 duration-200">
           <div className="flex items-center justify-between mb-8">
-            <div className="flex items-center gap-1.5 grayscale-[0.2]" onClick={() => handleNavigation('/')}>
+            <div className="flex items-center gap-1.5 grayscale-[0.2]" onClick={handleLogoClick}>
               <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-400 font-bold text-white text-[10px] shadow-sm">
                 THE-
               </div>
@@ -188,7 +389,14 @@ export default function Header() {
               <span className={isLifecyclePage ? 'text-amber-500' : 'text-gray-800 dark:text-white'}>ЖЦП</span>
             </button>
             <button onClick={() => handleNavigation('/notifications')} className="flex items-center gap-4 text-left p-2 hover:bg-gray-100 dark:hover:bg-white/10 rounded-xl transition-colors">
-              <Bell size={24} className={pathname === '/notifications' ? 'text-amber-500' : 'text-gray-500 dark:text-white'} />
+              <div className="relative">
+                <Bell size={24} className={pathname === '/notifications' ? 'text-amber-500' : 'text-gray-500 dark:text-white'} />
+                {unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-2 inline-flex min-w-4.5 h-4.5 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-bold text-white">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
+              </div>
               <span className={pathname === '/notifications' ? 'text-amber-500' : 'text-gray-800 dark:text-white'}>Уведомления</span>
             </button>
           </nav>
@@ -230,19 +438,22 @@ export default function Header() {
                 {!mounted && <Moon size={22} />}
               </button>
             </div>
-            <div className="flex items-center gap-4 p-2 rounded-2xl bg-gray-50 dark:bg-white/5">
+            <button
+              onClick={handleProfileClick}
+              className="flex w-full items-center gap-4 p-2 rounded-2xl bg-gray-50 dark:bg-white/5 text-left"
+            >
               <div className="h-10 w-10 overflow-hidden rounded-full">
                 <img
-                  src="https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80"
+                  src={profileAvatar}
                   alt="User avatar"
                   className="h-full w-full object-cover"
                 />
               </div>
               <div>
-                <p className="font-semibold text-gray-900 dark:text-white">Пользователь</p>
-                <p className="text-xs text-gray-500">user@example.com</p>
+                <p className="font-semibold text-gray-900 dark:text-white">{profileName}</p>
+                <p className="text-xs text-gray-500">{profileEmail}</p>
               </div>
-            </div>
+            </button>
           </div>
         </div>
       )}

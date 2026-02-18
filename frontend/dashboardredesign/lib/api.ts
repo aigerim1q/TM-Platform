@@ -62,7 +62,16 @@ export function getCurrentUserId() {
 
   const payload = parseJwtPayload(token);
   const subject = payload?.sub;
-  return typeof subject === "string" ? subject : "";
+  if (typeof subject !== "string") {
+    return "";
+  }
+
+  const trimmed = subject.trim();
+  if (!trimmed || trimmed === "undefined" || trimmed === "null") {
+    return "";
+  }
+
+  return trimmed;
 }
 
 export function setTokens(tokens: AuthTokens) {

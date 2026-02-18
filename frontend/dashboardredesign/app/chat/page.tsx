@@ -1,11 +1,24 @@
 'use client';
 
 import { Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Header from '@/components/header';
 import Sidebar from '@/components/sidebar';
 import AIChatContent from '@/components/ai-chat-content';
 
 export default function ChatPage() {
+  return (
+    <Suspense fallback={<div className="p-6 text-sm text-gray-500">Загрузка...</div>}>
+      <ChatPageContent />
+    </Suspense>
+  );
+}
+
+function ChatPageContent() {
+  const searchParams = useSearchParams();
+  const mode = searchParams.get('mode');
+  const showContextSidebar = mode !== 'ordinary';
+
   const selectedChat = {
     id: 0,
     name: 'AI-Ассистент The Qurylys',
@@ -15,9 +28,11 @@ export default function ChatPage() {
   return (
     <div className="flex h-screen bg-white dark:bg-background">
       {/* AI Context Sidebar */}
-      <div className="hidden md:block h-full">
-        <Sidebar />
-      </div>
+      {showContextSidebar && (
+        <div className="hidden md:block h-full">
+          <Sidebar />
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="flex-1 flex flex-col h-full overflow-hidden relative pt-24">

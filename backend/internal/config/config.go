@@ -9,28 +9,30 @@ import (
 )
 
 type Config struct {
-	ServerAddr string
-	DBHost     string
-	DBPort     string
-	DBUser     string
-	DBPassword string
-	DBName     string
-	DBSSLMode  string
-	JWTSecret  string
+	ServerAddr    string
+	DBHost        string
+	DBPort        string
+	DBUser        string
+	DBPassword    string
+	DBName        string
+	DBSSLMode     string
+	JWTSecret     string
+	ZHCPParserURL string
 }
 
 func Load() Config {
 	_ = godotenv.Load()
 
 	cfg := Config{
-		ServerAddr: getEnv("SERVER_ADDR", ":8080"),
-		DBHost:     getEnv("DB_HOST", "localhost"),
-		DBPort:     getEnv("DB_PORT", "5432"),
-		DBUser:     getEnv("DB_USER", "tm_user"),
-		DBPassword: getEnv("DB_PASSWORD", "tm_password"),
-		DBName:     getEnv("DB_NAME", "tm_db"),
-		DBSSLMode:  getEnv("DB_SSLMODE", "disable"),
-		JWTSecret:  getEnv("JWT_SECRET", "change_me"),
+		ServerAddr:    getEnv("SERVER_ADDR", ":8080"),
+		DBHost:        getEnv("DB_HOST", "localhost"),
+		DBPort:        getEnv("DB_PORT", "5432"),
+		DBUser:        getEnv("DB_USER", "tm_user"),
+		DBPassword:    getEnv("DB_PASSWORD", "tm_password"),
+		DBName:        getEnv("DB_NAME", "tm_db"),
+		DBSSLMode:     getEnv("DB_SSLMODE", "disable"),
+		JWTSecret:     getEnv("JWT_SECRET", "change_me"),
+		ZHCPParserURL: getEnv("ZHCP_PARSER_URL", "http://localhost:8081"),
 	}
 
 	if cfg.JWTSecret == "change_me" {
