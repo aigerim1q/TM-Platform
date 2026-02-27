@@ -93,11 +93,11 @@ export default function ProjectOverviewPage() {
       const { data } = await api.get<ProjectMemberEntity[]>(`/projects/${normalizedProjectId}/members`);
       const members = Array.isArray(data) ? data : [];
       const names = members
-        .filter((member) => member.role === 'member')
+        .filter((member) => member.role === 'manager' || member.role === 'member')
         .map((member) => getDisplayNameFromEmail(member.user.email))
         .filter((name) => String(name || '').trim().length > 0);
 
-      setResponsibleNames(names);
+      setResponsibleNames(Array.from(new Set(names)));
     } catch {
       setResponsibleNames([]);
     }
@@ -764,6 +764,7 @@ export default function ProjectOverviewPage() {
         isOpen={isDelayReportsModalOpen}
         onClose={() => setIsDelayReportsModalOpen(false)}
         projectId={project?.id || projectId}
+        isProjectOverviewMode
       />
 
       <ProjectExpenseReportModal

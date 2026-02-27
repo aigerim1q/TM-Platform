@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,24 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
+
+var taskCommentMentionPattern = regexp.MustCompile(`(?i)(?:^|\s)@([a-z0-9._%+\-]+(?:@[a-z0-9.\-]+\.[a-z]{2,})?)`)
+
+func extractMentionedRefs(message string) map[string]struct{} {
+	result := make(map[string]struct{})
+	for _, match := range taskCommentMentionPattern.FindAllStringSubmatch(message, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		normalized := strings.ToLower(strings.TrimSpace(match[1]))
+		if normalized == "" {
+			continue
+		}
+		result[normalized] = struct{}{}
+	}
+
+	return result
+}
 
 type updateProjectHTTPReq struct {
 	Title                *string         `json:"title"`
@@ -273,6 +292,8 @@ type updateTaskRequest struct {
 	Deadline             *string         `json:"deadline"`
 	StageID              *string         `json:"stageId"`
 	StageIDAlt           *string         `json:"stage_id"`
+	AssignmentMode       *string         `json:"assignmentMode"`
+	AssignmentModeAlt    *string         `json:"assignment_mode"`
 	OrderIndex           *int            `json:"order_index"`
 	ExpectedUpdatedAt    *string         `json:"expectedUpdatedAt"`
 	ExpectedUpdatedAtAlt *string         `json:"expected_updated_at"`
@@ -312,6 +333,16 @@ type createDelayReportReq struct {
 
 type createTaskCommentReq struct {
 	Message *string `json:"message"`
+}
+
+type createReportChatReq struct {
+	Message *string `json:"message"`
+}
+
+type createDelayReportCommentReq struct {
+	Message     *string `json:"message"`
+	ParentID    *string `json:"parentId"`
+	ParentIDAlt *string `json:"parent_id"`
 }
 
 type updateProjectPageReq struct {
@@ -916,10 +947,34 @@ func (h *HTTPHandler) CreateTaskComment(w http.ResponseWriter, r *http.Request) 
 
 	members, membersErr := h.repo.ListMembersByProject(r.Context(), requesterID, comment.ProjectID)
 	if membersErr == nil {
+		commentLink := "/project/task-" + comment.TaskID.String() + "?commentId=" + comment.ID.String()
+		mentionedRefs := extractMentionedRefs(comment.Message)
+		mentionedTargets := make([]uuid.UUID, 0, len(mentionedRefs))
+		mentionedSet := make(map[uuid.UUID]struct{}, len(mentionedRefs))
 		targets := make([]uuid.UUID, 0, len(members))
 		for _, member := range members {
-			targets = append(targets, member.User.ID)
+			memberID := member.User.ID
+			memberEmail := strings.ToLower(strings.TrimSpace(member.User.Email))
+			memberName := memberEmail
+			if atIndex := strings.Index(memberName, "@"); atIndex > 0 {
+				memberName = memberName[:atIndex]
+			}
+
+			_, isMentionedByEmail := mentionedRefs[memberEmail]
+			_, isMentionedByName := mentionedRefs[memberName]
+			if isMentionedByEmail || isMentionedByName {
+				if memberID != requesterID {
+					if _, exists := mentionedSet[memberID]; !exists {
+						mentionedSet[memberID] = struct{}{}
+						mentionedTargets = append(mentionedTargets, memberID)
+					}
+				}
+				continue
+			}
+
+			targets = append(targets, memberID)
 		}
+
 		h.notifyUsers(
 			r.Context(),
 			targets,
@@ -927,10 +982,24 @@ func (h *HTTPHandler) CreateTaskComment(w http.ResponseWriter, r *http.Request) 
 			notifications.KindTaskComment,
 			"Новый комментарий в задаче",
 			"В задаче появился новый комментарий",
-			"/project/task-"+comment.TaskID.String(),
+			commentLink,
 			"task",
 			&comment.TaskID,
 		)
+
+		if len(mentionedTargets) > 0 {
+			h.notifyUsers(
+				r.Context(),
+				mentionedTargets,
+				requesterID,
+				notifications.KindTaskComment,
+				"Вас упомянули в комментарии",
+				"В задаче вас упомянули в комментарии",
+				commentLink,
+				"task",
+				&comment.TaskID,
+			)
+		}
 	}
 
 	writeJSON(w, http.StatusCreated, comment)
@@ -961,6 +1030,75 @@ func (h *HTTPHandler) ListTaskComments(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, comments)
+}
+
+func (h *HTTPHandler) CreateTaskReportChatMessage(w http.ResponseWriter, r *http.Request) {
+	requesterID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task id"})
+		return
+	}
+
+	var req createReportChatReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+		return
+	}
+
+	if req.Message == nil || strings.TrimSpace(*req.Message) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+
+	message, err := h.repo.CreateTaskReportChatMessage(r.Context(), requesterID, taskID, strings.TrimSpace(*req.Message))
+	if err != nil {
+		if errors.Is(err, ErrTaskCommentForbidden) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		if IsNotFound(err) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "task not found"})
+			return
+		}
+		log.Printf("CreateTaskReportChatMessage failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create message"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, message)
+}
+
+func (h *HTTPHandler) ListTaskReportChatMessages(w http.ResponseWriter, r *http.Request) {
+	requesterID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	taskID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid task id"})
+		return
+	}
+
+	messages, err := h.repo.ListTaskReportChatMessages(r.Context(), requesterID, taskID)
+	if err != nil {
+		if IsNotFound(err) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		log.Printf("ListTaskReportChatMessages failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch chat messages"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, messages)
 }
 
 func (h *HTTPHandler) ListTaskHistory(w http.ResponseWriter, r *http.Request) {
@@ -1017,6 +1155,216 @@ func (h *HTTPHandler) ListDelayReports(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, reports)
 }
 
+func (h *HTTPHandler) CreateProjectReportChatMessage(w http.ResponseWriter, r *http.Request) {
+	requesterID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+		return
+	}
+
+	var req createReportChatReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+		return
+	}
+
+	if req.Message == nil || strings.TrimSpace(*req.Message) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+
+	message, err := h.repo.CreateProjectReportChatMessage(r.Context(), requesterID, projectID, strings.TrimSpace(*req.Message))
+	if err != nil {
+		if IsNotFound(err) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		log.Printf("CreateProjectReportChatMessage failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create message"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, message)
+}
+
+func (h *HTTPHandler) ListProjectReportChatMessages(w http.ResponseWriter, r *http.Request) {
+	requesterID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+		return
+	}
+
+	messages, err := h.repo.ListProjectReportChatMessages(r.Context(), requesterID, projectID)
+	if err != nil {
+		if IsNotFound(err) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		log.Printf("ListProjectReportChatMessages failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch chat messages"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, messages)
+}
+
+func (h *HTTPHandler) CreateDelayReportComment(w http.ResponseWriter, r *http.Request) {
+	requesterID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+		return
+	}
+
+	reportID, err := uuid.Parse(chi.URLParam(r, "reportId"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid report id"})
+		return
+	}
+
+	var req createDelayReportCommentReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
+		return
+	}
+
+	if req.Message == nil || strings.TrimSpace(*req.Message) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message is required"})
+		return
+	}
+
+	var parentID *uuid.UUID
+	parentIDRaw := firstNonNilString(req.ParentID, req.ParentIDAlt)
+	if parentIDRaw != nil && strings.TrimSpace(*parentIDRaw) != "" {
+		parsedParentID, parseErr := uuid.Parse(strings.TrimSpace(*parentIDRaw))
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid parent id"})
+			return
+		}
+		parentID = &parsedParentID
+	}
+
+	comment, err := h.repo.CreateDelayReportComment(r.Context(), requesterID, projectID, reportID, parentID, strings.TrimSpace(*req.Message))
+	if err != nil {
+		if errors.Is(err, ErrDelayReportCommentForbidden) || IsNotFound(err) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		log.Printf("CreateDelayReportComment failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create comment"})
+		return
+	}
+
+	members, membersErr := h.repo.ListMembersByProject(r.Context(), requesterID, projectID)
+	if membersErr == nil {
+		commentLink := "/project/" + projectID.String() + "/reports?reportId=" + reportID.String() + "&commentId=" + comment.ID.String()
+		reportTaskID, reportTaskErr := h.repo.ResolveDelayReportTaskID(r.Context(), requesterID, projectID, reportID)
+		if reportTaskErr == nil && reportTaskID != nil {
+			commentLink = "/project/task-" + reportTaskID.String() + "/reports?reportId=" + reportID.String() + "&commentId=" + comment.ID.String()
+		}
+		targets := make([]uuid.UUID, 0, len(members))
+		replyTarget := uuid.Nil
+
+		if parentID != nil {
+			existingComments, commentsErr := h.repo.ListDelayReportComments(r.Context(), requesterID, projectID, reportID)
+			if commentsErr == nil {
+				for _, existingComment := range existingComments {
+					if existingComment.ID == *parentID {
+						replyTarget = existingComment.UserID
+						break
+					}
+				}
+			}
+		}
+
+		for _, member := range members {
+			memberID := member.User.ID
+			if replyTarget != uuid.Nil && memberID == replyTarget {
+				continue
+			}
+			targets = append(targets, memberID)
+		}
+
+		h.notifyUsers(
+			r.Context(),
+			targets,
+			requesterID,
+			notifications.KindTaskComment,
+			"Новый комментарий к отчету",
+			"В отчете появился новый комментарий",
+			commentLink,
+			"delay_report",
+			&reportID,
+		)
+
+		if replyTarget != uuid.Nil {
+			h.notifyUsers(
+				r.Context(),
+				[]uuid.UUID{replyTarget},
+				requesterID,
+				notifications.KindTaskComment,
+				"Ответ на ваш комментарий",
+				"В отчете ответили на ваш комментарий",
+				commentLink,
+				"delay_report",
+				&reportID,
+			)
+		}
+	}
+
+	writeJSON(w, http.StatusCreated, comment)
+}
+
+func (h *HTTPHandler) ListDelayReportComments(w http.ResponseWriter, r *http.Request) {
+	requesterID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	projectID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid project id"})
+		return
+	}
+
+	reportID, err := uuid.Parse(chi.URLParam(r, "reportId"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid report id"})
+		return
+	}
+
+	comments, err := h.repo.ListDelayReportComments(r.Context(), requesterID, projectID, reportID)
+	if err != nil {
+		if IsNotFound(err) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
+		log.Printf("ListDelayReportComments failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch comments"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, comments)
+}
+
 func (h *HTTPHandler) ListMembers(w http.ResponseWriter, r *http.Request) {
 	requesterID, err := userIDFromRequest(r)
 	if err != nil {
@@ -1064,15 +1412,14 @@ func (h *HTTPHandler) UpdateRoles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	managerIDRaw := firstNonNilString(req.ManagerID, req.ManagerIDAlt)
-	if managerIDRaw == nil || strings.TrimSpace(*managerIDRaw) == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "managerId is required"})
-		return
-	}
-
-	managerID, err := uuid.Parse(strings.TrimSpace(*managerIDRaw))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid manager id"})
-		return
+	var managerID *uuid.UUID
+	if managerIDRaw != nil && strings.TrimSpace(*managerIDRaw) != "" {
+		parsedManagerID, parseErr := uuid.Parse(strings.TrimSpace(*managerIDRaw))
+		if parseErr != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid manager id"})
+			return
+		}
+		managerID = &parsedManagerID
 	}
 
 	memberIDsRaw := req.MemberIDs
@@ -1122,21 +1469,23 @@ func (h *HTTPHandler) UpdateRoles(w http.ResponseWriter, r *http.Request) {
 		projectTitlePart = " в проекте «" + projectTitle + "»"
 	}
 
-	h.notifyUsers(
-		r.Context(),
-		[]uuid.UUID{managerID},
-		requesterID,
-		notifications.KindProjectMember,
-		"Обновлены роли в проекте",
-		"Вам назначена роль: "+roleTitle(ProjectMemberRoleManager)+projectTitlePart,
-		"/project-overview/"+projectID.String(),
-		"project",
-		&projectID,
-	)
+	if managerID != nil {
+		h.notifyUsers(
+			r.Context(),
+			[]uuid.UUID{*managerID},
+			requesterID,
+			notifications.KindProjectMember,
+			"Обновлены роли в проекте",
+			"Вам назначена роль: "+roleTitle(ProjectMemberRoleManager)+projectTitlePart,
+			"/project-overview/"+projectID.String(),
+			"project",
+			&projectID,
+		)
+	}
 
 	memberTargets := make([]uuid.UUID, 0, len(memberIDs))
 	for _, memberID := range memberIDs {
-		if memberID == managerID {
+		if managerID != nil && memberID == *managerID {
 			continue
 		}
 		memberTargets = append(memberTargets, memberID)
@@ -1675,16 +2024,44 @@ func (h *HTTPHandler) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if len(addedAssignees) > 0 {
-			members, membersErr := h.repo.ListMembersByProject(r.Context(), userID, task.ProjectID)
-			if membersErr == nil {
-				targetIDs := h.resolveAssigneeUserIDs(members, addedAssignees)
+			assignmentModeRaw := firstNonNilString(req.AssignmentMode, req.AssignmentModeAlt)
+			assignmentMode := strings.ToLower(strings.TrimSpace(derefOrEmpty(assignmentModeRaw)))
+			isDelegation := assignmentMode == "delegation" || assignmentMode == "delegate"
+			notificationKind := notifications.KindTaskAssigned
+			notificationTitle := "Вас назначили на проект"
+			notificationBody := "Вам назначена задача: " + task.Title
+			if isDelegation {
+				notificationKind = notifications.KindTaskDelegated
+				notificationTitle = "Вам делегирована задача"
+				notificationBody = "Вам делегирована задача: " + task.Title
+			}
+
+			resolvedAssigneeIDs, resolveErr := h.repo.ResolveUserIDsByRefs(r.Context(), addedAssignees)
+			if resolveErr != nil {
+				log.Printf("UpdateTask assignee resolve failed: %v", resolveErr)
+			} else {
+				notifyIDs := make([]uuid.UUID, 0, len(resolvedAssigneeIDs))
+				for _, assigneeID := range resolvedAssigneeIDs {
+					if assigneeID == uuid.Nil {
+						continue
+					}
+
+					if err := h.repo.EnsureMember(r.Context(), userID, task.ProjectID, assigneeID); err != nil {
+						// Keep task update successful even if member sync fails for one assignee.
+						log.Printf("UpdateTask ensure member failed for %s in project %s: %v", assigneeID.String(), task.ProjectID.String(), err)
+						continue
+					}
+
+					notifyIDs = append(notifyIDs, assigneeID)
+				}
+
 				h.notifyUsers(
 					r.Context(),
-					targetIDs,
+					notifyIDs,
 					userID,
-					notifications.KindTaskDelegated,
-					"Вам делегирована задача",
-					"Вам назначена задача: "+task.Title,
+					notificationKind,
+					notificationTitle,
+					notificationBody,
 					"/project/task-"+task.ID.String(),
 					"task",
 					&task.ID,

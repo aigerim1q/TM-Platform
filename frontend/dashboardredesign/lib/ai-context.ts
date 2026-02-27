@@ -1,3 +1,5 @@
+import { getCurrentUserId } from './api';
+
 export type AIProjectContext = {
   projectId?: string;
   projectTitle: string;
@@ -32,15 +34,21 @@ function isBrowser() {
   return typeof window !== "undefined";
 }
 
+function buildScopedContextKey() {
+  const userId = getCurrentUserId() || 'anonymous';
+  return `${AI_CONTEXT_STORAGE_KEY}:${userId}`;
+}
+
 export function saveAIProjectContext(context: AIProjectContext) {
   if (!isBrowser()) return;
-  localStorage.setItem(AI_CONTEXT_STORAGE_KEY, JSON.stringify(context));
+  localStorage.setItem(buildScopedContextKey(), JSON.stringify(context));
   window.dispatchEvent(new CustomEvent<AIProjectContext>(AI_CONTEXT_UPDATED_EVENT, { detail: context }));
 }
 
 export function loadAIProjectContext(): AIProjectContext | null {
   if (!isBrowser()) return null;
-  const raw = localStorage.getItem(AI_CONTEXT_STORAGE_KEY);
+  const scopedKey = buildScopedContextKey();
+  const raw = localStorage.getItem(scopedKey);
   if (!raw) return null;
 
   try {
@@ -52,6 +60,6 @@ export function loadAIProjectContext(): AIProjectContext | null {
 
 export function clearAIProjectContext() {
   if (!isBrowser()) return;
-  localStorage.removeItem(AI_CONTEXT_STORAGE_KEY);
+  localStorage.removeItem(buildScopedContextKey());
   window.dispatchEvent(new CustomEvent(AI_CONTEXT_UPDATED_EVENT));
 }

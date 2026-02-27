@@ -208,14 +208,47 @@ type DelayReportAuthor struct {
 }
 
 type DelayReportResponse struct {
-	ID        uuid.UUID         `json:"id"`
-	ProjectID uuid.UUID         `json:"project_id"`
-	UserID    uuid.UUID         `json:"user_id"`
-	StageID   *uuid.UUID        `json:"stage_id,omitempty"`
-	TaskID    *uuid.UUID        `json:"task_id,omitempty"`
-	Message   string            `json:"message"`
-	CreatedAt time.Time         `json:"created_at"`
-	Author    DelayReportAuthor `json:"author"`
+	ID            uuid.UUID         `json:"id"`
+	ProjectID     uuid.UUID         `json:"project_id"`
+	UserID        uuid.UUID         `json:"user_id"`
+	StageID       *uuid.UUID        `json:"stage_id,omitempty"`
+	TaskID        *uuid.UUID        `json:"task_id,omitempty"`
+	Message       string            `json:"message"`
+	CreatedAt     time.Time         `json:"created_at"`
+	CommentsCount int               `json:"comments_count"`
+	Author        DelayReportAuthor `json:"author"`
+}
+
+type ReportChatMessageAuthor struct {
+	ID    uuid.UUID `json:"id"`
+	Email string    `json:"email"`
+}
+
+type ReportChatMessageResponse struct {
+	ID        uuid.UUID               `json:"id"`
+	ProjectID uuid.UUID               `json:"project_id"`
+	TaskID    *uuid.UUID              `json:"task_id,omitempty"`
+	UserID    uuid.UUID               `json:"user_id"`
+	Message   string                  `json:"message"`
+	CreatedAt time.Time               `json:"created_at"`
+	Author    ReportChatMessageAuthor `json:"author"`
+}
+
+type DelayReportCommentAuthor struct {
+	ID    uuid.UUID `json:"id"`
+	Email string    `json:"email"`
+}
+
+type DelayReportCommentResponse struct {
+	ID         uuid.UUID                `json:"id"`
+	ReportID   uuid.UUID                `json:"report_id"`
+	ProjectID  uuid.UUID                `json:"project_id"`
+	UserID     uuid.UUID                `json:"user_id"`
+	ParentID   *uuid.UUID               `json:"parent_id,omitempty"`
+	Message    string                   `json:"message"`
+	CreatedAt  time.Time                `json:"created_at"`
+	ReplyCount int                      `json:"reply_count"`
+	Author     DelayReportCommentAuthor `json:"author"`
 }
 
 type TaskComment struct {

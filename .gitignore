@@ -43,3 +43,7 @@ vendor/
 # Logs
 logs/
 *.log
+
+# Runtime uploads and local binaries
+/uploads/
+/backend/server

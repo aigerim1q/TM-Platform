@@ -64,6 +64,22 @@ func (h *Handler) AppendMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, message)
 }
 
+func (h *Handler) ResetMessages(w http.ResponseWriter, r *http.Request) {
+	userID, ok := userIDFromRequest(r)
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	mode := r.URL.Query().Get("mode")
+	if err := h.repo.ResetMessages(r.Context(), userID, mode); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to reset messages"})
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func userIDFromRequest(r *http.Request) (uuid.UUID, bool) {
 	userIDStr, ok := auth.UserIDFromContext(r.Context())
 	if !ok || strings.TrimSpace(userIDStr) == "" {

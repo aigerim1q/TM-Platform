@@ -1,13 +1,16 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
-import { useRouter, useParams } from 'next/navigation';
-import { ChevronRight, Clock, Users, AlertCircle, Send, Share2, Copy, X, Search, UserPlus, Calendar, ChevronDown, Paperclip, Star, Check } from 'lucide-react';
+import { type ChangeEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { usePathname, useRouter, useParams, useSearchParams } from 'next/navigation';
+import { ChevronRight, Clock, Users, AlertCircle, Send, Share2, Copy, X, Search, UserPlus, Calendar, ChevronDown, Paperclip, Star, Check, FileText } from 'lucide-react';
 import Header from '@/components/header';
 import ResponsiblePersonsModal from '@/components/responsible-persons-modal';
 import DelayReportsModal from '@/components/delay-reports-modal';
+import LoadingSplash from '@/components/loading-splash';
 import { api, getApiErrorMessage, getApiStatus, getCurrentUserId } from '@/lib/api';
 import { packTaskBlocks, unpackTaskBlocks, type EditorBlock } from '@/components/editor/taskBlockMeta';
+import { uploadChatAttachment } from '@/lib/chats';
+import type { HierarchyTreeNode } from '@/lib/users';
 import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
 
 type TaskResponse = {
@@ -30,6 +33,12 @@ type ProjectMemberEntity = {
     email: string;
   };
   role: 'owner' | 'manager' | 'member';
+};
+
+type UserDirectoryEntity = {
+  id: string;
+  email: string;
+  full_name?: string | null;
 };
 
 type DelayReportEntity = {
@@ -104,9 +113,156 @@ function getRoleLabel(role?: string) {
   return 'Участник проекта';
 }
 
+function normalizeAssigneeIds(ids: string[]) {
+  return Array.from(new Set(ids.map((id) => String(id || '').trim()).filter(Boolean))).sort();
+}
+
+function buildHierarchyUserDirectory(tree: HierarchyTreeNode[]): Record<string, { name: string; roleLabel: string }> {
+  const directory: Record<string, { name: string; roleLabel: string }> = {};
+
+  const walk = (nodes: HierarchyTreeNode[]) => {
+    nodes.forEach((node) => {
+      const userId = String(node.user_id || '').trim();
+      if (userId) {
+        const fullName = String(node.user?.full_name || '').trim();
+        const email = String(node.user?.email || '').trim();
+        const roleTitle = String(node.role_title || '').trim();
+        const fallbackRole = node.type === 'company' ? 'Генеральный директор' : 'Сотрудник';
+        const name =
+          fullName
+          || (email ? getDisplayNameFromEmail(email) : '')
+          || String(node.title || '').trim()
+          || 'Сотрудник';
+
+        const existing = directory[userId];
+        if (!existing || (!existing.roleLabel && roleTitle)) {
+          directory[userId] = {
+            name,
+            roleLabel: roleTitle || fallbackRole,
+          };
+        }
+      }
+
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        walk(node.children);
+      }
+    });
+  };
+
+  walk(Array.isArray(tree) ? tree : []);
+  return directory;
+}
+
+function isOverdueReasonMessage(message?: string | null) {
+  const normalized = String(message || '').trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return normalized.includes('почему просрочка')
+    || normalized.includes('причина просрочки')
+    || normalized.includes('кто автор')
+    || normalized.includes('кто пишет');
+}
+
+function parseOverdueReasonMessage(message?: string | null) {
+  const text = String(message || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (line.toLowerCase().startsWith('почему просрочка:') || line.toLowerCase().startsWith('причина просрочки:')) {
+      return line.replace(/^(почему просрочка:|причина просрочки:)/i, '').trim();
+    }
+  }
+
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const reasonMatch = oneLine.match(/(?:почему просрочка:|причина просрочки:)\s*(.+)$/i);
+  if (reasonMatch?.[1]?.trim()) {
+    return reasonMatch[1].trim();
+  }
+
+  const cleaned = lines
+    .filter((line) => !line.toLowerCase().startsWith('кто автор:') && !line.toLowerCase().startsWith('кто пишет:'))
+    .join(' ')
+    .trim();
+
+  return cleaned || text;
+}
+
+function formatTaskHistoryMessage(message?: string | null) {
+  const text = String(message || '').trim();
+  if (!text) {
+    return '';
+  }
+
+  if (!isOverdueReasonMessage(text)) {
+    return text;
+  }
+
+  if (/^(почему просрочка:|причина просрочки:)/i.test(text)) {
+    return text;
+  }
+
+  const parsedReason = parseOverdueReasonMessage(text);
+  if (!parsedReason) {
+    return text;
+  }
+
+  return `Почему просрочка: ${parsedReason}`;
+}
+
+function parseTaskCommentMessage(message?: string | null) {
+  const lines = String(message || '').split('\n');
+  const attachments: string[] = [];
+  const textLines: string[] = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    const direct = line.replace(/^[-•]\s*/, '');
+    const isAttachment = /^https?:\/\//i.test(direct) || direct.startsWith('/uploads/');
+
+    if (line === 'Вложения:' || line === 'Attachments:') {
+      continue;
+    }
+
+    if (isAttachment) {
+      attachments.push(direct);
+      continue;
+    }
+
+    textLines.push(rawLine);
+  }
+
+  return {
+    text: textLines.join('\n').trim(),
+    attachments,
+  };
+}
+
+function resolveTaskAttachmentUrl(url: string) {
+  if (/^https?:\/\//i.test(url)) return url;
+  return getFileUrl(url) || url;
+}
+
+function getTaskAttachmentName(url: string) {
+  const clean = String(url || '').split('?')[0];
+  const chunks = clean.split('/').filter(Boolean);
+  const last = chunks[chunks.length - 1] || 'attachment';
+  return decodeURIComponent(last);
+}
+
 export default function TaskDetail() {
   const router = useRouter();
+  const pathname = usePathname();
   const params = useParams();
+  const searchParams = useSearchParams();
   const rawId = String(params.id || '');
   const isTaskPage = rawId.startsWith('task-');
   const taskId = isTaskPage ? rawId.slice(5) : '';
@@ -127,6 +283,8 @@ export default function TaskDetail() {
   const [taskComments, setTaskComments] = useState<TaskCommentEntity[]>([]);
   const [taskHistory, setTaskHistory] = useState<TaskHistoryEntity[]>([]);
   const [commentText, setCommentText] = useState('');
+  const [commentAttachments, setCommentAttachments] = useState<File[]>([]);
+  const [isMentionMenuOpen, setIsMentionMenuOpen] = useState(false);
   const [isSendingComment, setIsSendingComment] = useState(false);
   const [isUpdatingTaskStatus, setIsUpdatingTaskStatus] = useState(false);
   const [isDelegatingTask, setIsDelegatingTask] = useState(false);
@@ -138,13 +296,32 @@ export default function TaskDetail() {
   const [isAssigneeModalOpen, setIsAssigneeModalOpen] = useState(false);
   const [assigneeSelection, setAssigneeSelection] = useState<string[]>([]);
   const [isSavingAssignees, setIsSavingAssignees] = useState(false);
-  const [allUsers, setAllUsers] = useState<{ id: string; email: string }[]>([]);
+  const [allUsers, setAllUsers] = useState<UserDirectoryEntity[]>([]);
+  const [hierarchyUserDirectory, setHierarchyUserDirectory] = useState<Record<string, { name: string; roleLabel: string }>>({});
   const [isAddingMember, setIsAddingMember] = useState(false);
   const [memberSearchQuery, setMemberSearchQuery] = useState('');
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isTaskNotFound, setIsTaskNotFound] = useState(false);
   const [taskError, setTaskError] = useState<string | null>(null);
+  const [highlightedTaskCommentId, setHighlightedTaskCommentId] = useState<string | null>(null);
+  const commentDocInputRef = useRef<HTMLInputElement | null>(null);
+  const commentImageInputRef = useRef<HTMLInputElement | null>(null);
+  const taskCommentRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const hasHandledTaskCommentAnchorRef = useRef(false);
   const currentUserId = getCurrentUserId();
+
+  const selectedAssigneeFromHierarchy = useMemo(
+    () => String(searchParams.get('selectedAssignee') || '').trim(),
+    [searchParams],
+  );
+  const targetCommentIdFromQuery = useMemo(
+    () => String(searchParams.get('commentId') || '').trim(),
+    [searchParams],
+  );
+
+  useEffect(() => {
+    hasHandledTaskCommentAnchorRef.current = false;
+  }, [targetCommentIdFromQuery]);
 
   useEffect(() => {
     if (!isTaskPage || !taskId) {
@@ -206,72 +383,77 @@ export default function TaskDetail() {
     };
   }, [isTaskPage, taskId]);
 
-  useEffect(() => {
+  const refreshTaskDelayReason = useCallback(async () => {
     if (!isTaskPage || !task?.project_id || !task?.id) {
       setTaskDelayReason(null);
       return;
     }
 
+    try {
+      const { data } = await api.get<DelayReportEntity[]>(`/projects/${task.project_id}/delay-report`);
+      const reports = Array.isArray(data) ? data : [];
+      const filtered = reports.filter((report) => {
+        const reportTaskId = (report.task_id || report.taskId || '').trim();
+        return reportTaskId === task.id && isOverdueReasonMessage(report.message);
+      });
+
+      const latest = [...filtered].sort((a, b) => {
+        const aTime = new Date(a.created_at || a.createdAt || '').getTime();
+        const bTime = new Date(b.created_at || b.createdAt || '').getTime();
+        return bTime - aTime;
+      })[0];
+
+      setTaskDelayReason(latest?.message?.trim() || null);
+    } catch {
+      setTaskDelayReason(null);
+    }
+  }, [isTaskPage, task?.id, task?.project_id]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    const loadDelayReason = async () => {
-      try {
-        const { data } = await api.get<DelayReportEntity[]>(`/projects/${task.project_id}/delay-report`);
-        if (cancelled) {
-          return;
-        }
-
-        const reports = Array.isArray(data) ? data : [];
-        const filtered = reports.filter((report) => {
-          const reportTaskId = (report.task_id || report.taskId || '').trim();
-          return reportTaskId === task.id;
-        });
-
-        const latest = [...filtered].sort((a, b) => {
-          const aTime = new Date(a.created_at || a.createdAt || '').getTime();
-          const bTime = new Date(b.created_at || b.createdAt || '').getTime();
-          return bTime - aTime;
-        })[0];
-
-        setTaskDelayReason(latest?.message?.trim() || null);
-      } catch {
-        if (!cancelled) {
-          setTaskDelayReason(null);
-        }
+    const load = async () => {
+      await refreshTaskDelayReason();
+      if (cancelled) {
+        return;
       }
     };
 
-    void loadDelayReason();
+    void load();
 
     return () => {
       cancelled = true;
     };
-  }, [isTaskPage, task?.id, task?.project_id]);
+  }, [refreshTaskDelayReason]);
 
   useEffect(() => {
     if (!isTaskPage || !task?.project_id) {
       setProjectMembers([]);
+      setAllUsers([]);
+      setHierarchyUserDirectory({});
       return;
     }
 
     let cancelled = false;
 
     const loadMembers = async () => {
-      try {
-        const [{ data: membersData }, { data: usersData }] = await Promise.all([
-          api.get<ProjectMemberEntity[]>(`/projects/${task.project_id}/members`),
-          api.get<{ id: string; email: string }[]>('/users'),
-        ]);
-        if (cancelled) {
-          return;
-        }
-        setProjectMembers(Array.isArray(membersData) ? membersData : []);
-        setAllUsers(Array.isArray(usersData) ? usersData : []);
-      } catch {
-        if (!cancelled) {
-          setProjectMembers([]);
-        }
+      const [membersResult, usersResult, hierarchyResult] = await Promise.allSettled([
+        api.get<ProjectMemberEntity[]>(`/projects/${task.project_id}/members`),
+        api.get<UserDirectoryEntity[]>('/users'),
+        api.get<{ tree?: HierarchyTreeNode[] }>('/hierarchy/tree'),
+      ]);
+
+      if (cancelled) {
+        return;
       }
+
+      const membersData = membersResult.status === 'fulfilled' ? membersResult.value.data : [];
+      const usersData = usersResult.status === 'fulfilled' ? usersResult.value.data : [];
+      const hierarchyTree = hierarchyResult.status === 'fulfilled' ? (hierarchyResult.value.data?.tree || []) : [];
+
+      setProjectMembers(Array.isArray(membersData) ? membersData : []);
+      setAllUsers(Array.isArray(usersData) ? usersData : []);
+      setHierarchyUserDirectory(buildHierarchyUserDirectory(Array.isArray(hierarchyTree) ? hierarchyTree : []));
     };
 
     void loadMembers();
@@ -280,6 +462,26 @@ export default function TaskDetail() {
       cancelled = true;
     };
   }, [isTaskPage, task?.project_id]);
+
+  useEffect(() => {
+    if (!isTaskPage || !selectedAssigneeFromHierarchy) {
+      return;
+    }
+
+    setAssigneeSelection((prev) => {
+      const fromTask = taskAssignees.map((id) => String(id || '').trim()).filter(Boolean);
+      const base = prev.length > 0 ? prev : fromTask;
+      const merged = new Set(base.map((id) => String(id || '').trim()).filter(Boolean));
+      merged.add(selectedAssigneeFromHierarchy);
+      return Array.from(merged);
+    });
+    setIsAssigneeModalOpen(true);
+
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('selectedAssignee');
+    const nextUrl = nextParams.toString() ? `${pathname}?${nextParams.toString()}` : pathname;
+    router.replace(nextUrl);
+  }, [isTaskPage, pathname, router, searchParams, selectedAssigneeFromHierarchy, taskAssignees]);
 
   useEffect(() => {
     if (!isTaskPage || !task?.project_id) {
@@ -308,6 +510,47 @@ export default function TaskDetail() {
     };
   }, [isTaskPage, task?.project_id]);
 
+  useEffect(() => {
+    if (!isTaskPage || !targetCommentIdFromQuery) {
+      return;
+    }
+    if (hasHandledTaskCommentAnchorRef.current) {
+      return;
+    }
+
+    if (activeTab !== 'comments') {
+      setActiveTab('comments');
+      return;
+    }
+
+    const exists = taskComments.some((item) => String(item.id || '').trim() === targetCommentIdFromQuery);
+    if (!exists) {
+      return;
+    }
+
+    const targetNode = taskCommentRefs.current[targetCommentIdFromQuery];
+    if (!targetNode) {
+      return;
+    }
+
+    setHighlightedTaskCommentId(targetCommentIdFromQuery);
+    targetNode.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    hasHandledTaskCommentAnchorRef.current = true;
+
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('commentId');
+    const nextUrl = nextParams.toString() ? `${pathname}?${nextParams.toString()}` : pathname;
+    router.replace(nextUrl);
+
+    const timeoutID = window.setTimeout(() => {
+      setHighlightedTaskCommentId((prev) => (prev === targetCommentIdFromQuery ? null : prev));
+    }, 2600);
+
+    return () => {
+      window.clearTimeout(timeoutID);
+    };
+  }, [activeTab, isTaskPage, pathname, router, searchParams, targetCommentIdFromQuery, taskComments]);
+
   const currentTaskUserRole = useMemo<'owner' | 'manager' | 'member'>(() => {
     const matchedMember = projectMembers.find((member) => member.user.id === currentUserId);
     return matchedMember?.role || 'member';
@@ -330,21 +573,92 @@ export default function TaskDetail() {
     return false;
   }, [currentUserEmail, currentUserId, taskAssignees]);
 
-  const canInviteToTask = isTaskPage && currentTaskUserRole === 'owner';
+  const canInviteToTask = isTaskPage
+    && (currentTaskUserRole === 'owner' || currentTaskUserRole === 'manager' || isCurrentUserTaskAssignee);
   const canDelegateTask = isTaskPage
     && (currentTaskUserRole === 'owner' || currentTaskUserRole === 'manager' || isCurrentUserTaskAssignee);
 
   const memberNameById = useMemo(() => {
     const map = new Map<string, string>();
+    const usersById = new Map(allUsers.map((user) => [String(user.id || '').trim(), user]));
+
     projectMembers.forEach((member) => {
-      map.set(member.user.id, getDisplayNameFromEmail(member.user.email));
+      const memberId = String(member.user.id || '').trim();
+      const hierarchyInfo = hierarchyUserDirectory[memberId];
+      const userFromDirectory = usersById.get(memberId);
+      const fullName = String(userFromDirectory?.full_name || '').trim();
+      const email = String(userFromDirectory?.email || member.user.email || '').trim();
+
+      map.set(
+        memberId,
+        hierarchyInfo?.name
+        || fullName
+        || (email ? getDisplayNameFromEmail(email) : 'Сотрудник'),
+      );
     });
     return map;
-  }, [projectMembers]);
+  }, [allUsers, hierarchyUserDirectory, projectMembers]);
 
   const visibleTaskAssignees = useMemo(() => {
-    return taskAssignees.map((assignee) => memberNameById.get(assignee) || assignee);
-  }, [memberNameById, taskAssignees]);
+    const usersById = new Map(allUsers.map((user) => [String(user.id || '').trim(), user]));
+
+    return taskAssignees.map((assignee) => {
+      const normalized = String(assignee || '').trim();
+      if (!normalized) return 'Сотрудник';
+
+      const hierarchyInfo = hierarchyUserDirectory[normalized];
+      if (hierarchyInfo?.name) {
+        return hierarchyInfo.name;
+      }
+
+      const fromMembers = memberNameById.get(normalized);
+      if (fromMembers) {
+        return fromMembers;
+      }
+
+      const userFromDirectory = usersById.get(normalized);
+      const fullName = String(userFromDirectory?.full_name || '').trim();
+      const email = String(userFromDirectory?.email || '').trim();
+      if (fullName) return fullName;
+      if (email) return getDisplayNameFromEmail(email);
+      return 'Сотрудник';
+    });
+  }, [allUsers, hierarchyUserDirectory, memberNameById, taskAssignees]);
+
+  const assigneeCandidates = useMemo(() => {
+    const base = projectMembers.map((member) => ({
+      id: member.user.id,
+      name: memberNameById.get(member.user.id) || getDisplayNameFromEmail(member.user.email),
+      roleLabel: getRoleLabel(member.role),
+    }));
+
+    const knownIds = new Set(base.map((item) => item.id));
+    const allUsersById = new Map(allUsers.map((user) => [String(user.id || '').trim(), user]));
+
+    assigneeSelection.forEach((id) => {
+      const normalized = String(id || '').trim();
+      if (!normalized || knownIds.has(normalized)) {
+        return;
+      }
+
+      const hierarchyInfo = hierarchyUserDirectory[normalized];
+      const userFromDirectory = allUsersById.get(normalized);
+      const fullName = String(userFromDirectory?.full_name || '').trim();
+      const email = String(userFromDirectory?.email || '').trim();
+
+      base.push({
+        id: normalized,
+        name:
+          hierarchyInfo?.name
+          || fullName
+          || (email ? getDisplayNameFromEmail(email) : 'Сотрудник'),
+        roleLabel: hierarchyInfo?.roleLabel || 'Роль не указана',
+      });
+      knownIds.add(normalized);
+    });
+
+    return base;
+  }, [allUsers, assigneeSelection, hierarchyUserDirectory, memberNameById, projectMembers]);
 
   const toggleAssignee = (memberId: string) => {
     setAssigneeSelection((prev) => {
@@ -384,13 +698,35 @@ export default function TaskDetail() {
     );
   }, [allUsers, projectMembers, memberSearchQuery]);
 
-  const saveTaskAssignees = async () => {
-    if (!task || isSavingAssignees) {
+  const openHierarchyAssigneePicker = useCallback(() => {
+    if (!isTaskPage) {
       return;
     }
 
+    const currentTaskPath = `/project/${rawId}`;
+    const params = new URLSearchParams({
+      mode: 'pick-assignee',
+      returnTo: currentTaskPath,
+    });
+    router.push(`/hierarchy?${params.toString()}`);
+  }, [isTaskPage, rawId, router]);
+
+  const hasPendingAssigneeChanges = useMemo(() => {
+    const selected = normalizeAssigneeIds(assigneeSelection);
+    const current = normalizeAssigneeIds(taskAssignees);
+    if (selected.length !== current.length) {
+      return true;
+    }
+    return selected.some((id, index) => id !== current[index]);
+  }, [assigneeSelection, taskAssignees]);
+
+  const saveTaskAssignees = async ({ closeAfterSave = true }: { closeAfterSave?: boolean } = {}) => {
+    if (!task || isSavingAssignees) {
+      return false;
+    }
+
     const unpacked = unpackTaskBlocks(task.blocks);
-    const normalizedAssignees = Array.from(new Set(assigneeSelection.map((id) => String(id || '').trim()).filter(Boolean)));
+    const normalizedAssignees = normalizeAssigneeIds(assigneeSelection);
 
     setIsSavingAssignees(true);
     setTaskError(null);
@@ -400,6 +736,7 @@ export default function TaskDetail() {
         status: task.status,
         startDate: task.start_date || task.startDate || null,
         deadline: task.deadline || null,
+        assignmentMode: 'assignee',
         assignees: normalizedAssignees,
         blocks: packTaskBlocks(unpacked.blocks, normalizedAssignees),
         expected_updated_at: task.updated_at || task.updatedAt,
@@ -407,13 +744,28 @@ export default function TaskDetail() {
 
       setTask(data || task);
       setTaskAssignees(normalizedAssignees);
-      setIsAssigneeModalOpen(false);
+      if (closeAfterSave) {
+        setIsAssigneeModalOpen(false);
+      }
+      return true;
     } catch (error) {
       setTaskError(getApiErrorMessage(error, 'Не удалось назначить ответственных по задаче'));
+      return false;
     } finally {
       setIsSavingAssignees(false);
     }
   };
+
+  const closeAssigneeModal = useCallback(() => {
+    if (isSavingAssignees) {
+      return;
+    }
+    if (!hasPendingAssigneeChanges) {
+      setIsAssigneeModalOpen(false);
+      return;
+    }
+    void saveTaskAssignees({ closeAfterSave: true });
+  }, [hasPendingAssigneeChanges, isSavingAssignees, saveTaskAssignees]);
 
   const refreshTaskContext = async () => {
     if (!task?.id) {
@@ -477,14 +829,27 @@ export default function TaskDetail() {
 
   const sendTaskComment = async () => {
     const text = commentText.trim();
-    if (!task?.id || !text || isSendingComment) {
+    if (!task?.id || (!text && commentAttachments.length === 0) || isSendingComment) {
       return;
     }
 
     setIsSendingComment(true);
     try {
-      await api.post(`/tasks/${task.id}/comment`, { message: text });
+      const uploadedUrls: string[] = [];
+      for (const file of commentAttachments) {
+        const uploaded = await uploadChatAttachment(file);
+        uploadedUrls.push(uploaded.url);
+      }
+
+      const filesText = uploadedUrls.length
+        ? `Вложения:\n${uploadedUrls.map((url) => `- ${url}`).join('\n')}`
+        : '';
+
+      const message = [text, filesText].filter(Boolean).join('\n\n');
+      await api.post(`/tasks/${task.id}/comment`, { message });
       setCommentText('');
+      setCommentAttachments([]);
+      setIsMentionMenuOpen(false);
       await refreshTaskContext();
     } catch (error) {
       setTaskError(getApiErrorMessage(error, 'Не удалось отправить комментарий'));
@@ -492,6 +857,38 @@ export default function TaskDetail() {
       setIsSendingComment(false);
     }
   };
+
+  const handleCommentFilesPicked = (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files || []);
+    if (files.length === 0) {
+      return;
+    }
+
+    setCommentAttachments((prev) => [...prev, ...files]);
+    event.target.value = '';
+  };
+
+  const removeCommentAttachment = (index: number) => {
+    setCommentAttachments((prev) => prev.filter((_, idx) => idx !== index));
+  };
+
+  const insertMention = (rawValue: string) => {
+    const mentionValue = String(rawValue || '').trim().split(/\s+/)[0] || '';
+    if (!mentionValue) {
+      return;
+    }
+
+    setCommentText((prev) => {
+      const suffix = prev && !prev.endsWith(' ') ? ' ' : '';
+      return `${prev}${suffix}@${mentionValue} `;
+    });
+    setIsMentionMenuOpen(false);
+  };
+
+  const mentionableMembers = useMemo(
+    () => projectMembers.filter((member) => member.user.id !== currentUserId),
+    [currentUserId, projectMembers],
+  );
 
   const dynamicPreparation = useMemo(() => {
     if (!isTaskPage) {
@@ -504,29 +901,24 @@ export default function TaskDetail() {
       .filter(Boolean);
   }, [isTaskPage, taskBlocks]);
 
-  const dynamicPreparationMedia = useMemo(() => {
+  const orderedTaskContentBlocks = useMemo(() => {
     if (!isTaskPage) {
-      return [] as Array<{
-        id: string;
-        type: 'image' | 'video' | 'file';
-        url: string;
-        fileName: string;
-      }>;
+      return [] as EditorBlock[];
     }
 
-    return taskBlocks
-      .filter((block) => block.type === 'image' || block.type === 'video' || block.type === 'file')
-      .map((block) => {
-        const rawUrl = String(block.fileUrl || block.content || '').trim();
-        const resolvedUrl = getFileUrl(rawUrl) || rawUrl;
-        return {
-          id: block.id,
-          type: block.type,
-          url: resolvedUrl,
-          fileName: String(block.fileName || 'Вложение').trim() || 'Вложение',
-        };
-      })
-      .filter((item) => Boolean(item.url));
+    return taskBlocks.filter((block) => {
+      if (block.type === 'subtask') {
+        return false;
+      }
+      if (block.type === 'page') {
+        const rawPageId = String(block.pageId || (block as EditorBlock & { page_id?: string }).page_id || '').trim();
+        return Boolean(String(block.content || '').trim() || rawPageId);
+      }
+      if (block.type === 'image' || block.type === 'video' || block.type === 'file') {
+        return Boolean(String(block.fileUrl || block.content || '').trim());
+      }
+      return Boolean(String(block.content || '').trim());
+    });
   }, [isTaskPage, taskBlocks]);
 
   const dynamicStages = useMemo<TaskViewStage[]>(() => {
@@ -545,64 +937,6 @@ export default function TaskDetail() {
         };
       });
   }, [isTaskPage, taskBlocks]);
-
-  const historyItems = [
-    {
-      id: 1,
-      type: 'expense',
-      user: 'Вы',
-      action: 'добавили новый расход',
-      detail: 'Арматура A500C',
-      time: '2 минуты назад',
-      avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&h=100&fit=crop&crop=face',
-    },
-    {
-      id: 2,
-      type: 'deadline',
-      user: 'Евгений С.',
-      action: 'обновил дедлайн задачи',
-      oldDate: '24.11.2025',
-      newDate: '26.01.2026',
-      time: '15 минут назад',
-      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=100&h=100&fit=crop&crop=face',
-    },
-    {
-      id: 3,
-      type: 'delegate',
-      user: '',
-      action: 'Автоматически делегирована задача',
-      detail: '"Подготовка опалубки" перешла к следующему этапу согласно графику',
-      time: '1 час назад',
-      avatar: 'system',
-    },
-    {
-      id: 4,
-      type: 'status',
-      user: 'Серик Р.',
-      action: 'изменил статус',
-      oldStatus: 'Ожидание',
-      newStatus: 'В работе',
-      time: '3 часа назад',
-      avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=100&h=100&fit=crop&crop=face',
-    },
-    {
-      id: 5,
-      type: 'file',
-      user: 'Омар А.',
-      action: 'прикрепил файл',
-      fileName: 'smetka_v3',
-      time: 'Вчера, 18:30',
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=100&h=100&fit=crop&crop=face',
-    },
-    {
-      id: 6,
-      type: 'created',
-      user: '',
-      action: 'Задача создано в системе',
-      time: '22.12.2025',
-      avatar: 'system',
-    },
-  ];
 
   const teamMembers = [
     ...projectMembers
@@ -645,24 +979,11 @@ export default function TaskDetail() {
         status: 'in_progress',
         startDate: task.start_date || task.startDate || null,
         deadline: delegateDueDate ? new Date(`${delegateDueDate}T00:00:00.000Z`).toISOString() : (task.deadline || null),
+        assignmentMode: 'delegation',
         assignees: [delegatedTo],
         blocks: packTaskBlocks(taskBlocks, [delegatedTo]),
         expected_updated_at: task.updated_at || task.updatedAt,
       });
-
-      if (task.project_id) {
-        const userName = memberNameById.get(delegatedTo) || delegatedTo;
-        const extra = [
-          delegatePriority ? `Приоритет: ${delegatePriority}` : '',
-          delegateComment.trim() ? `Комментарий: ${delegateComment.trim()}` : '',
-        ].filter(Boolean).join(' • ');
-        await api.post(`/projects/${task.project_id}/delay-report`, {
-          taskId: task.id,
-          message: extra
-            ? `Задача делегирована пользователю: ${userName}. ${extra}`
-            : `Задача делегирована пользователю: ${userName}`,
-        });
-      }
 
       await refreshTaskContext();
       setTaskActionMessage('Задача успешно делегирована');
@@ -678,72 +999,39 @@ export default function TaskDetail() {
     }
   };
 
-  const responsiblePersons = [
-    {
-      id: '1',
-      name: 'Омар Ахмет',
-      role: 'Архитектор',
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=200&h=200&fit=crop',
-    },
-    {
-      id: '2',
-      name: 'Зейнулла Рышман',
-      role: 'Архитектор',
-      avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200&h=200&fit=crop',
-    },
-    {
-      id: '3',
-      name: 'Серик Рах',
-      role: 'Прораб',
-      avatar: 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?w=200&h=200&fit=crop',
-    },
-  ];
-
   const taskData: TaskViewData = {
-    title: 'Возведение колонн на 1 этаже несущих конструкции',
-    deadline: '26.11.2025 23:59 (-9 часов)',
-    startDate: 'Дата начала: 15.11.2025 12:00',
-    responsible: ['Омар Ахмет', 'Зейнулла Ршыман', 'Серик Рах...'],
-    issue: 'Причина просрочки: Айды Рахимбаев болел 5 дней',
-    preparation: [
-      'Проверка геодезической разбивки осей и отметок',
-      'Подготовка и выравнивание опубликованных для колонн',
-      'Проверка качества арматурных каркасов (диаметр, шаг, фиксация)',
-      'Затем переидем к задачам:',
-    ],
-    stages: [
-      {
-        title: 'Пересмотреть и доработать чертежи',
-        description: 'Пересмотреть расположение всех существующих квартир\nПереработать конфигурацию несущих стен',
-        status: 'Выполнено',
-      },
-      {
-        title: 'С новой конфигурацией добавить...',
-        description: 'Добавить больше квартир за счет оптимизации пространства и корректировки нежиных зон...',
-        status: 'Выполнено',
-      },
-      {
-        title: 'Провести проверку новой планировки',
-        description: 'Проверить соответствие новой планировки требованиям пожарной безопасности',
-        status: 'Ошибка',
-        days: '-9 часов',
-      },
-    ],
+    title: '',
+    deadline: '—',
+    startDate: 'Дата начала: —',
+    responsible: [],
+    issue: '',
+    preparation: [],
+    stages: [],
   };
 
   const displayTaskData = useMemo(() => {
-    if (!isTaskPage || !task) {
+    if (!isTaskPage) {
       return taskData;
+    }
+
+    if (!task) {
+      return {
+        ...taskData,
+        responsible: visibleTaskAssignees,
+        issue: taskDelayReason || '',
+        preparation: dynamicPreparation,
+        stages: dynamicStages,
+      };
     }
 
     return {
       ...taskData,
-      title: task.title || taskData.title,
+      title: task.title || '',
       deadline: formatTaskDate(task.deadline),
       startDate: `Дата начала: ${formatTaskDate(task.start_date || task.startDate)}`,
-      responsible: visibleTaskAssignees.length > 0 ? visibleTaskAssignees : taskData.responsible,
-      issue: taskDelayReason || taskData.issue,
-      preparation: dynamicPreparation.length > 0 ? dynamicPreparation : taskData.preparation,
+      responsible: visibleTaskAssignees,
+      issue: taskDelayReason || '',
+      preparation: dynamicPreparation,
       stages: dynamicStages,
     };
   }, [dynamicPreparation, dynamicStages, isTaskPage, task, taskDelayReason, visibleTaskAssignees]);
@@ -759,6 +1047,19 @@ export default function TaskDetail() {
     }
     return displayTaskData.stages.filter((stage) => stage.status !== 'Выполнено');
   }, [displayTaskData.stages, showCompletedStages]);
+
+  const parsedIssue = useMemo(() => parseOverdueReasonMessage(displayTaskData.issue), [displayTaskData.issue]);
+
+  if (isTaskPage && isLoadingTask && !task && !isTaskNotFound && !taskError) {
+    return (
+      <div className="min-h-screen bg-white dark:bg-background pb-20">
+        <Header />
+        <main className="max-w-7xl mx-auto px-6 pt-24">
+          <LoadingSplash compact title="Загружаем задачу" subtitle="Подтягиваем последние данные..." />
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-white dark:bg-background pb-20">
@@ -790,7 +1091,11 @@ export default function TaskDetail() {
           {isTaskPage && Boolean(taskId) && (
             <button
               type="button"
-              onClick={() => router.push(`/tasks/${taskId}/edit`)}
+              onClick={() => {
+                const returnTo = `${pathname}${searchParams.toString() ? `?${searchParams.toString()}` : ''}`;
+                const params = new URLSearchParams({ returnTo });
+                router.push(`/tasks/${taskId}/edit?${params.toString()}`);
+              }}
               className="w-full md:w-auto rounded-full bg-amber-600 px-6 py-2 text-sm font-semibold text-white hover:bg-amber-700 transition-colors whitespace-nowrap"
             >
               Редактировать задачу
@@ -805,7 +1110,7 @@ export default function TaskDetail() {
 
         {isTaskPage && isLoadingTask && (
           <div className="mb-6 rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-sm text-gray-600">
-            Loading...
+            <LoadingSplash compact title="Загружаем задачу" subtitle="Подтягиваем последние данные..." />
           </div>
         )}
 
@@ -877,7 +1182,10 @@ export default function TaskDetail() {
           </div>
 
           {/* Status Card */}
-          <div className="bg-[#111111] rounded-[32px] p-6 shadow-xl relative overflow-hidden group">
+          <div
+            onClick={() => setIsDelayReportsModalOpen(true)}
+            className="bg-[#111111] rounded-[32px] p-6 shadow-xl relative overflow-hidden group cursor-pointer"
+          >
             <div className="absolute top-0 right-0 w-32 h-32 bg-red-500/10 rounded-full blur-3xl -mr-16 -mt-16 group-hover:bg-red-500/20 transition-all" />
             <div className="relative z-10 flex items-start gap-4">
               <div className="bg-white/10 p-2.5 rounded-2xl text-white">
@@ -885,13 +1193,22 @@ export default function TaskDetail() {
               </div>
               <div className="flex-1">
                 <p className="text-xs font-bold text-white/50 uppercase tracking-wide mb-1">Проблема / Статус</p>
-                <p className="text-sm text-white font-medium leading-relaxed">{displayTaskData.issue}</p>
+                {displayTaskData.issue ? (
+                  <div className="space-y-1.5 text-sm text-white/95 leading-relaxed">
+                    <p>
+                      <span className="text-white/60">Почему просрочка:</span>{' '}
+                      <span className="font-semibold">{parsedIssue || displayTaskData.issue}</span>
+                    </p>
+                  </div>
+                ) : (
+                  <p className="text-sm text-white font-medium leading-relaxed">Нажмите, чтобы указать причину просрочки</p>
+                )}
                 <button
                   type="button"
                   onClick={() => setIsDelayReportsModalOpen(true)}
                   className="text-amber-400 text-[11px] font-bold mt-2 flex items-center gap-1 hover:underline"
                 >
-                  ПОДРОБНЕЕ <ChevronRight size={12} />
+                  {displayTaskData.issue ? 'ПОДРОБНЕЕ' : 'НАПИСАТЬ'} <ChevronRight size={12} />
                 </button>
               </div>
             </div>
@@ -905,7 +1222,98 @@ export default function TaskDetail() {
             {/* Preparation Section */}
             <div className="mb-8">
               <h2 className="text-lg font-bold text-gray-900 dark:text-white mb-4">Подготовка</h2>
-              {displayTaskData.preparation.length > 0 ? (
+              {isTaskPage ? (
+                orderedTaskContentBlocks.length > 0 ? (
+                  <div className="space-y-4">
+                    {orderedTaskContentBlocks.map((block) => {
+                      const content = String(block.content || '').trim();
+                      const rawMediaUrl = String(block.fileUrl || block.content || '').trim();
+                      const mediaUrl = getFileUrl(rawMediaUrl) || rawMediaUrl;
+                      const fileName = String(block.fileName || 'Вложение').trim() || 'Вложение';
+
+                      if (block.type === 'text') {
+                        return (
+                          <p key={block.id} className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
+                            {content}
+                          </p>
+                        );
+                      }
+
+                      if (block.type === 'image') {
+                        return (
+                          <img
+                            key={block.id}
+                            src={mediaUrl}
+                            alt={fileName}
+                            className="w-full max-h-80 rounded-xl object-cover border border-gray-200 dark:border-gray-700"
+                          />
+                        );
+                      }
+
+                      if (block.type === 'video') {
+                        return (
+                          <video
+                            key={block.id}
+                            src={mediaUrl}
+                            controls
+                            className="w-full max-h-80 rounded-xl border border-gray-200 dark:border-gray-700"
+                          />
+                        );
+                      }
+
+                      if (block.type === 'file') {
+                        return (
+                          <a
+                            key={block.id}
+                            href={mediaUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-2 text-sm font-medium text-amber-600 hover:text-amber-700 hover:underline"
+                          >
+                            📎 {fileName}
+                          </a>
+                        );
+                      }
+
+                      if (block.type === 'page') {
+                        const pageId = String(block.pageId || (block as EditorBlock & { page_id?: string }).page_id || '').trim();
+                        const projectId = String(task?.project_id || '').trim();
+                        const canOpenPage = Boolean(pageId && projectId);
+                        const returnTo = (pathname && pathname.startsWith('/')) ? pathname : `/project/${rawId}`;
+                        const params = new URLSearchParams({ returnTo });
+                        const pageEditorPath = canOpenPage
+                          ? `/project/${projectId}/editor/page/${pageId}?${params.toString()}`
+                          : '';
+
+                        return (
+                          <div key={block.id} className="flex items-start gap-3">
+                            <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded border border-gray-300 text-gray-500 dark:border-gray-600 dark:text-gray-400">
+                              <FileText className="h-3.5 w-3.5" />
+                            </span>
+                            <button
+                              type="button"
+                              disabled={!canOpenPage}
+                              onClick={() => {
+                                if (!pageEditorPath) {
+                                  return;
+                                }
+                                router.push(pageEditorPath);
+                              }}
+                              className="w-full rounded-lg px-1 py-0.5 text-left text-base font-semibold text-gray-700 underline decoration-dotted underline-offset-2 transition-colors hover:text-amber-600 disabled:cursor-not-allowed disabled:no-underline disabled:text-gray-500 dark:text-gray-300 dark:disabled:text-gray-500 cursor-pointer"
+                            >
+                              {content || 'Новая страница'}
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      return null;
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Контент задачи пока пуст</p>
+                )
+              ) : displayTaskData.preparation.length > 0 ? (
                 <ul className="space-y-2">
                   {displayTaskData.preparation.map((item, idx) => (
                     <li key={idx} className="text-sm text-gray-700 dark:text-gray-300">
@@ -916,53 +1324,10 @@ export default function TaskDetail() {
               ) : (
                 <p className="text-sm text-gray-500 dark:text-gray-400">Пока нет текстовых заметок</p>
               )}
-
-              {isTaskPage && dynamicPreparationMedia.length > 0 && (
-                <div className="mt-5 space-y-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Вложения из редактора</p>
-                  <div className="space-y-3">
-                    {dynamicPreparationMedia.map((item) => {
-                      if (item.type === 'image') {
-                        return (
-                          <img
-                            key={item.id}
-                            src={item.url}
-                            alt={item.fileName}
-                            className="w-full max-h-80 rounded-xl object-cover border border-gray-200 dark:border-gray-700"
-                          />
-                        );
-                      }
-
-                      if (item.type === 'video') {
-                        return (
-                          <video
-                            key={item.id}
-                            src={item.url}
-                            controls
-                            className="w-full max-h-80 rounded-xl border border-gray-200 dark:border-gray-700"
-                          />
-                        );
-                      }
-
-                      return (
-                        <a
-                          key={item.id}
-                          href={item.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-2 text-sm font-medium text-amber-600 hover:text-amber-700 hover:underline"
-                        >
-                          📎 {item.fileName}
-                        </a>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* Stages Section */}
-            {displayTaskData.stages.length > 0 && (
+            {!isTaskPage && displayTaskData.stages.length > 0 && (
               <div>
                 <div className="mb-4 flex items-center justify-between gap-3">
                   <h2 className="text-lg font-bold text-gray-900 dark:text-white">Этапы выполнения</h2>
@@ -1084,20 +1449,105 @@ export default function TaskDetail() {
                     {taskComments.length === 0 ? (
                       <p className="text-sm text-gray-500 dark:text-gray-400">Комментариев пока нет</p>
                     ) : (
-                      taskComments.map((item) => (
-                        <div key={item.id} className="rounded-xl bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 px-3 py-3">
-                          <div className="flex items-center gap-2 mb-1">
-                            <p className="font-semibold text-gray-900 dark:text-white text-sm">{getDisplayNameFromEmail(item.author?.email || 'Пользователь')}</p>
-                            <p className="text-gray-500 text-xs">{formatTaskDate(item.created_at || item.createdAt)}</p>
+                      taskComments.map((item) => {
+                        const parsed = parseTaskCommentMessage(item.message || '');
+                        const commentID = String(item.id || '').trim();
+                        const isHighlighted = highlightedTaskCommentId === commentID;
+
+                        return (
+                          <div
+                            key={item.id}
+                            id={`task-comment-${commentID}`}
+                            ref={(node) => {
+                              taskCommentRefs.current[commentID] = node;
+                            }}
+                            className={`rounded-xl bg-white dark:bg-gray-800 border border-gray-100 dark:border-gray-700 px-3 py-3 transition-all ${
+                              isHighlighted
+                                ? 'ring-2 ring-amber-400 ring-offset-2 ring-offset-gray-50 dark:ring-offset-gray-900'
+                                : ''
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 mb-1">
+                              <p className="font-semibold text-gray-900 dark:text-white text-sm">{getDisplayNameFromEmail(item.author?.email || 'Пользователь')}</p>
+                              <p className="text-gray-500 text-xs">{formatTaskDate(item.created_at || item.createdAt)}</p>
+                            </div>
+
+                            {parsed.text ? (
+                              <p className="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap mb-2">{parsed.text}</p>
+                            ) : null}
+
+                            {parsed.attachments.length > 0 ? (
+                              <div className="space-y-2">
+                                {parsed.attachments.map((url, idx) => {
+                                  const fullUrl = resolveTaskAttachmentUrl(url);
+                                  const isImage = /\.(png|jpe?g|webp)$/i.test(fullUrl);
+                                  const isVideo = /\.(mp4|mov)$/i.test(fullUrl);
+
+                                  if (isImage) {
+                                    return (
+                                      <img
+                                        key={`${item.id}-img-${idx}`}
+                                        src={fullUrl}
+                                        alt="attachment"
+                                        className="w-full max-h-40 rounded-lg object-cover"
+                                      />
+                                    );
+                                  }
+
+                                  if (isVideo) {
+                                    return (
+                                      <video
+                                        key={`${item.id}-video-${idx}`}
+                                        src={fullUrl}
+                                        controls
+                                        className="w-full max-h-40 rounded-lg"
+                                      />
+                                    );
+                                  }
+
+                                  return (
+                                    <a
+                                      key={`${item.id}-file-${idx}`}
+                                      href={fullUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="block rounded-lg border border-gray-200 bg-gray-50 px-2 py-1.5 text-xs text-amber-700 hover:underline dark:border-gray-700 dark:bg-gray-900 dark:text-amber-300"
+                                    >
+                                      {getTaskAttachmentName(url)}
+                                    </a>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
                           </div>
-                          <p className="text-gray-700 dark:text-gray-300 text-sm whitespace-pre-wrap">{item.message}</p>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
 
                   {/* Comment Input */}
                   <div className="mt-8">
+                    {commentAttachments.length > 0 && (
+                      <div className="mb-3 flex flex-wrap gap-2">
+                        {commentAttachments.map((file, idx) => (
+                          <span
+                            key={`${file.name}-${file.size}-${idx}`}
+                            className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200"
+                          >
+                            {file.name}
+                            <button
+                              type="button"
+                              onClick={() => removeCommentAttachment(idx)}
+                              className="text-gray-500 hover:text-red-500"
+                              aria-label="Удалить файл"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+
                     <div className="flex gap-3 items-end mb-3">
                       <input
                         type="text"
@@ -1109,26 +1559,73 @@ export default function TaskDetail() {
                       <button
                         type="button"
                         onClick={() => void sendTaskComment()}
-                        disabled={isSendingComment || commentText.trim().length === 0}
+                        disabled={isSendingComment || (commentText.trim().length === 0 && commentAttachments.length === 0)}
                         className="bg-yellow-500 text-white w-10 h-10 rounded-full hover:bg-yellow-600 transition-colors flex items-center justify-center disabled:opacity-60"
                       >
                         <Send className="w-5 h-5" />
                       </button>
                     </div>
-                    <div className="flex gap-4 px-4">
+                    <div className="relative flex gap-4 px-4">
                       <button
                         type="button"
-                        onClick={() => router.push('/documents')}
+                        onClick={() => commentDocInputRef.current?.click()}
                         className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1"
                       >
                         📄 Документы
                       </button>
-                      <button className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => commentImageInputRef.current?.click()}
+                        className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1"
+                      >
                         📷 Фото
                       </button>
-                      <button className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setIsMentionMenuOpen((prev) => !prev)}
+                        className="text-gray-600 dark:text-gray-400 text-sm hover:text-gray-900 dark:hover:text-gray-200 transition-colors flex items-center gap-1"
+                      >
                         @ Упомянуть
                       </button>
+
+                      <input
+                        ref={commentDocInputRef}
+                        type="file"
+                        multiple
+                        accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.zip,.rar,application/*"
+                        className="hidden"
+                        onChange={handleCommentFilesPicked}
+                      />
+                      <input
+                        ref={commentImageInputRef}
+                        type="file"
+                        multiple
+                        accept="image/*"
+                        className="hidden"
+                        onChange={handleCommentFilesPicked}
+                      />
+
+                      {isMentionMenuOpen && (
+                        <div className="absolute left-0 top-7 z-20 w-72 max-h-52 overflow-y-auto rounded-xl border border-gray-200 bg-white p-2 shadow-lg dark:border-gray-700 dark:bg-gray-900">
+                          {mentionableMembers.length === 0 ? (
+                            <p className="px-2 py-1 text-xs text-gray-500 dark:text-gray-400">Нет пользователей для упоминания</p>
+                          ) : (
+                            mentionableMembers.map((member) => {
+                              const mentionDisplayName = memberNameById.get(member.user.id) || getDisplayNameFromEmail(member.user.email);
+                              return (
+                                <button
+                                  key={member.user.id}
+                                  type="button"
+                                  onClick={() => insertMention(mentionDisplayName)}
+                                  className="flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800"
+                                >
+                                  <span className="text-sm text-gray-800 dark:text-gray-200">{mentionDisplayName}</span>
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </>
@@ -1140,7 +1637,7 @@ export default function TaskDetail() {
                   ) : (
                     taskHistory.map((item) => (
                       <div key={item.id} className="border-l-2 border-amber-400 pl-3 py-2">
-                        <p className="text-sm text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{item.message}</p>
+                        <p className="text-sm text-gray-900 dark:text-gray-100 whitespace-pre-wrap">{formatTaskHistoryMessage(item.message)}</p>
                         <p className="text-xs text-gray-500 mt-1">{getDisplayNameFromEmail(item.author?.email || 'Пользователь')} • {formatTaskDate(item.created_at || item.createdAt)}</p>
                       </div>
                     ))
@@ -1313,29 +1810,6 @@ export default function TaskDetail() {
                     )}
                   </div>
 
-                  {/* Add member inline for delegation */}
-                  {canInviteToTask && nonMemberUsers.length > 0 && (
-                    <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-3">
-                      <p className="mb-2 text-xs font-semibold text-gray-500 dark:text-gray-400 flex items-center gap-1.5">
-                        <UserPlus className="h-3.5 w-3.5" />
-                        Добавить участника в проект
-                      </p>
-                      <div className="max-h-32 space-y-1 overflow-y-auto">
-                        {nonMemberUsers.slice(0, 5).map((user) => (
-                          <button
-                            key={user.id}
-                            type="button"
-                            disabled={isAddingMember}
-                            onClick={() => void handleAddProjectMember(user.id)}
-                            className="flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
-                          >
-                            <span className="font-medium text-gray-700 dark:text-gray-300">{getDisplayNameFromEmail(user.email)}</span>
-                            <span className="text-xs text-amber-600 font-semibold">+ Добавить</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               </div>
 
@@ -1366,7 +1840,6 @@ export default function TaskDetail() {
           isOpen={isResponsibleModalOpen}
           onClose={() => setIsResponsibleModalOpen(false)}
           projectId={isTaskPage ? String(task?.project_id || '') : String(params.id || '')}
-          persons={responsiblePersons}
         />
 
         <DelayReportsModal
@@ -1374,24 +1847,25 @@ export default function TaskDetail() {
           onClose={() => setIsDelayReportsModalOpen(false)}
           projectId={isTaskPage ? String(task?.project_id || '') : String(params.id || '')}
           taskId={isTaskPage ? String(task?.id || '') : undefined}
+          onChanged={() => refreshTaskDelayReason()}
         />
 
         {isTaskPage && isAssigneeModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center">
             <div
               className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-              onClick={() => !isSavingAssignees && setIsAssigneeModalOpen(false)}
+              onClick={closeAssigneeModal}
             />
 
             <div className="relative z-10 w-full max-w-2xl rounded-3xl bg-white p-6 shadow-2xl dark:bg-gray-900 dark:border dark:border-gray-700">
               <div className="mb-4 flex items-center justify-between">
                 <div>
                   <h3 className="text-xl font-bold text-gray-900 dark:text-white">Ответственные по задаче</h3>
-                  <p className="text-sm text-gray-500 dark:text-gray-400">Выберите участников проекта для назначения на задачу</p>
+                  <p className="text-sm text-gray-500 dark:text-gray-400">Выберите сотрудников для назначения на задачу</p>
                 </div>
                 <button
                   type="button"
-                  onClick={() => setIsAssigneeModalOpen(false)}
+                  onClick={closeAssigneeModal}
                   disabled={isSavingAssignees}
                   className="rounded-xl p-2 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
                 >
@@ -1401,21 +1875,21 @@ export default function TaskDetail() {
 
               {/* Existing project members — toggle as assignees */}
               <div className="mb-2 max-h-60 space-y-2 overflow-y-auto">
-                {projectMembers.map((member) => {
-                  const isSelected = assigneeSelection.includes(member.user.id);
+                {assigneeCandidates.map((candidate) => {
+                  const isSelected = assigneeSelection.includes(candidate.id);
                   return (
                     <button
                       type="button"
-                      key={member.user.id}
-                      onClick={() => toggleAssignee(member.user.id)}
+                      key={candidate.id}
+                      onClick={() => toggleAssignee(candidate.id)}
                       className={`flex w-full items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${isSelected
                         ? 'border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-900/20'
                         : 'border-gray-200 hover:bg-gray-50 dark:border-gray-700 dark:hover:bg-gray-800'
                         }`}
                     >
                       <div>
-                        <p className="font-semibold text-gray-900 dark:text-white">{getDisplayNameFromEmail(member.user.email)}</p>
-                        <p className="text-xs text-gray-500">{getRoleLabel(member.role)}</p>
+                        <p className="font-semibold text-gray-900 dark:text-white">{candidate.name}</p>
+                        <p className="text-xs text-gray-500">{candidate.roleLabel}</p>
                       </div>
                       <div className={`h-5 w-5 rounded-full border-2 flex items-center justify-center ${isSelected ? 'border-amber-500 bg-amber-500' : 'border-gray-300'}`}>
                         {isSelected && <Check className="h-3 w-3 text-white" />}
@@ -1424,55 +1898,36 @@ export default function TaskDetail() {
                   );
                 })}
 
-                {projectMembers.length === 0 && (
-                  <p className="py-4 text-center text-sm text-gray-500">Нет участников проекта для назначения</p>
+                {assigneeCandidates.length === 0 && (
+                  <p className="py-4 text-center text-sm text-gray-500">Нет сотрудников для назначения</p>
                 )}
               </div>
 
-              {/* Add new project members section */}
+              {/* Add from hierarchy section */}
               {canInviteToTask && (
                 <div className="mt-4 border-t border-gray-200 dark:border-gray-700 pt-4">
                   <p className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300 flex items-center gap-1.5">
                     <UserPlus className="h-4 w-4" />
-                    Добавить участника в проект
+                    Добавить из иерархий
                   </p>
-                  <div className="relative mb-2">
-                    <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-                    <input
-                      type="text"
-                      value={memberSearchQuery}
-                      onChange={(e) => setMemberSearchQuery(e.target.value)}
-                      placeholder="Поиск пользователей..."
-                      className="w-full rounded-xl border border-gray-200 bg-gray-50 py-2.5 pl-9 pr-4 text-sm text-gray-900 placeholder-gray-400 dark:border-gray-700 dark:bg-gray-800 dark:text-white dark:placeholder-gray-500"
-                    />
-                  </div>
-                  <div className="max-h-40 space-y-1 overflow-y-auto">
-                    {nonMemberUsers.slice(0, 10).map((user) => (
-                      <button
-                        key={user.id}
-                        type="button"
-                        disabled={isAddingMember}
-                        onClick={() => void handleAddProjectMember(user.id)}
-                        className="flex w-full items-center justify-between rounded-xl px-4 py-2.5 text-left text-sm hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors disabled:opacity-50"
-                      >
-                        <span className="font-medium text-gray-900 dark:text-white">{getDisplayNameFromEmail(user.email)}</span>
-                        <span className="text-xs text-amber-600 font-semibold">+ Добавить</span>
-                      </button>
-                    ))}
-                    {memberSearchQuery && nonMemberUsers.length === 0 && (
-                      <p className="py-2 text-center text-xs text-gray-400">Пользователи не найдены</p>
-                    )}
-                    {!memberSearchQuery && nonMemberUsers.length === 0 && allUsers.length > 0 && (
-                      <p className="py-2 text-center text-xs text-gray-400">Все пользователи уже добавлены</p>
-                    )}
-                  </div>
+                  <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+                    Откройте иерархию компании и выберите сотрудника для назначения на задачу.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={openHierarchyAssigneePicker}
+                    className="inline-flex items-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-700 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                  >
+                    <UserPlus className="h-4 w-4" />
+                    Добавить из иерархий
+                  </button>
                 </div>
               )}
 
               <div className="flex justify-end gap-3">
                 <button
                   type="button"
-                  onClick={() => setIsAssigneeModalOpen(false)}
+                  onClick={closeAssigneeModal}
                   disabled={isSavingAssignees}
                   className="rounded-xl border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
                 >

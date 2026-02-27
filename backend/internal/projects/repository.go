@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -724,6 +725,14 @@ func (r *Repository) ListTasksByStage(ctx context.Context, ownerID, stageID uuid
 }
 
 func (r *Repository) UpdateTask(ctx context.Context, ownerID, taskID uuid.UUID, title, status string, startDate, deadline *time.Time, stageID *uuid.UUID, orderIndex int, blocks []byte) (Task, error) {
+	canWrite, err := r.CanWriteTaskDiscussion(ctx, ownerID, taskID)
+	if err != nil {
+		return Task{}, err
+	}
+	if !canWrite {
+		return Task{}, sql.ErrNoRows
+	}
+
 	if len(blocks) == 0 {
 		blocks = []byte("[]")
 	}
@@ -746,7 +755,7 @@ func (r *Repository) UpdateTask(ctx context.Context, ownerID, taskID uuid.UUID, 
 		   AND s.id = t.stage_id
 		   AND (
 			p.owner_id = $8
-			OR pm.role IN ('owner', 'manager')
+			OR pm.user_id = $8
 		   )
 		   AND (
 			 $9::uuid IS NULL
@@ -758,7 +767,7 @@ func (r *Repository) UpdateTask(ctx context.Context, ownerID, taskID uuid.UUID, 
 				WHERE s_target.id = $9
 				  AND (
 					p_target.owner_id = $8
-					OR pm_target.role IN ('owner', 'manager')
+					OR pm_target.user_id = $8
 				  )
 			 )
 		   )
@@ -900,6 +909,7 @@ func scanDelayReportResponse(scanner rowScanner) (DelayReportResponse, error) {
 		&report.CreatedAt,
 		&authorIDRaw,
 		&authorEmailRaw,
+		&report.CommentsCount,
 	)
 	if err != nil {
 		return DelayReportResponse{}, err
@@ -952,7 +962,8 @@ func (r *Repository) CreateDelayReport(ctx context.Context, projectID, userID uu
 		 	)
 		 	RETURNING id, project_id, user_id, stage_id, task_id, message, created_at
 		 )
-		 SELECT dr.id, dr.project_id, dr.user_id, dr.stage_id, dr.task_id, dr.message, dr.created_at, u.id, u.email
+		 SELECT dr.id, dr.project_id, dr.user_id, dr.stage_id, dr.task_id, dr.message, dr.created_at, u.id, u.email,
+		 	COALESCE((SELECT COUNT(*) FROM delay_report_comments c WHERE c.report_id = dr.id), 0) AS comments_count
 		 FROM inserted dr
 		 JOIN users u ON u.id = dr.user_id`,
 		projectID,
@@ -972,7 +983,8 @@ func (r *Repository) ListDelayReports(ctx context.Context, requesterID, projectI
 
 	rows, err := r.db.QueryContext(
 		ctx,
-		`SELECT dr.id, dr.project_id, dr.user_id, dr.stage_id, dr.task_id, dr.message, dr.created_at, u.id, u.email
+		`SELECT dr.id, dr.project_id, dr.user_id, dr.stage_id, dr.task_id, dr.message, dr.created_at, u.id, u.email,
+		 	COALESCE((SELECT COUNT(*) FROM delay_report_comments c WHERE c.report_id = dr.id), 0) AS comments_count
 		 FROM delay_reports dr
 		 JOIN users u ON u.id = dr.user_id
 		 WHERE dr.project_id = $1
@@ -1054,6 +1066,99 @@ func (r *Repository) ListMembersByProject(ctx context.Context, requesterID, proj
 	return members, rows.Err()
 }
 
+func (r *Repository) ResolveUserIDsByRefs(ctx context.Context, refs map[string]struct{}) ([]uuid.UUID, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]uuid.UUID, 0, len(refs))
+	seen := make(map[uuid.UUID]struct{}, len(refs))
+
+	for ref := range refs {
+		normalized := strings.TrimSpace(strings.ToLower(ref))
+		if normalized == "" {
+			continue
+		}
+
+		var userID uuid.UUID
+		if err := r.db.QueryRowContext(
+			ctx,
+			`SELECT id
+			 FROM users
+			 WHERE lower(email) = $1
+			    OR lower(id::text) = $1
+			 LIMIT 1`,
+			normalized,
+		).Scan(&userID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			return nil, err
+		}
+
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		ids = append(ids, userID)
+	}
+
+	return ids, nil
+}
+
+func (r *Repository) EnsureMember(ctx context.Context, requesterID, projectID, userID uuid.UUID) error {
+	result, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO project_members (project_id, user_id, role)
+		 SELECT $1, $2, 'member'
+		 WHERE EXISTS (
+		 	SELECT 1
+		 	FROM projects p
+		 	LEFT JOIN project_members me ON me.project_id = p.id AND me.user_id = $3
+		 	WHERE p.id = $1
+		 	  AND (
+		 		p.owner_id = $3
+		 		OR me.role IN ('owner', 'manager')
+		 	  )
+		 )
+		 AND NOT EXISTS (
+		 	SELECT 1
+		 	FROM project_members pm_existing
+		 	WHERE pm_existing.project_id = $1
+		 	  AND pm_existing.user_id = $2
+		 )`,
+		projectID,
+		userID,
+		requesterID,
+	)
+	if err != nil {
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		var exists int
+		if err := r.db.QueryRowContext(
+			ctx,
+			`SELECT 1
+			 FROM project_members
+			 WHERE project_id = $1
+			   AND user_id = $2`,
+			projectID,
+			userID,
+		).Scan(&exists); err == nil {
+			return nil
+		}
+
+		return sql.ErrNoRows
+	}
+
+	return nil
+}
+
 func (r *Repository) UpsertMember(ctx context.Context, requesterID, projectID, userID uuid.UUID, role ProjectMemberRole) error {
 	if role == ProjectMemberRoleManager {
 		return r.DelegateProject(ctx, requesterID, projectID, userID)
@@ -1095,7 +1200,7 @@ func (r *Repository) UpsertMember(ctx context.Context, requesterID, projectID, u
 	return nil
 }
 
-func (r *Repository) UpdateRoles(ctx context.Context, requesterID, projectID, managerID uuid.UUID, memberIDs []uuid.UUID) error {
+func (r *Repository) UpdateRoles(ctx context.Context, requesterID, projectID uuid.UUID, managerID *uuid.UUID, memberIDs []uuid.UUID) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1122,41 +1227,44 @@ func (r *Repository) UpdateRoles(ctx context.Context, requesterID, projectID, ma
 		return err
 	}
 
-	var managerCurrentRole string
-	err = tx.QueryRowContext(
-		ctx,
-		`SELECT role
-		 FROM project_members
-		 WHERE project_id = $1
-		   AND user_id = $2`,
-		projectID,
-		managerID,
-	).Scan(&managerCurrentRole)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	if err == nil && managerCurrentRole == string(ProjectMemberRoleOwner) {
-		return ErrCannotAssignOwnerAsManager
+	if managerID != nil {
+		var managerCurrentRole string
+		err = tx.QueryRowContext(
+			ctx,
+			`SELECT role
+			 FROM project_members
+			 WHERE project_id = $1
+			   AND user_id = $2`,
+			projectID,
+			*managerID,
+		).Scan(&managerCurrentRole)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if err == nil && managerCurrentRole == string(ProjectMemberRoleOwner) {
+			return ErrCannotAssignOwnerAsManager
+		}
 	}
 
 	keepMembers := make(map[uuid.UUID]struct{}, len(memberIDs)+4)
 	for _, memberID := range memberIDs {
-		if memberID == managerID {
+		if managerID != nil && memberID == *managerID {
 			continue
 		}
 		keepMembers[memberID] = struct{}{}
 	}
 
-	rows, err := tx.QueryContext(
-		ctx,
-		`SELECT user_id
+	rowsQuery := `SELECT user_id
 		 FROM project_members
 		 WHERE project_id = $1
-		   AND role = 'manager'
-		   AND user_id <> $2`,
-		projectID,
-		managerID,
-	)
+		   AND role = 'manager'`
+	rowsArgs := []any{projectID}
+	if managerID != nil {
+		rowsQuery += "\n\t\t   AND user_id <> $2"
+		rowsArgs = append(rowsArgs, *managerID)
+	}
+
+	rows, err := tx.QueryContext(ctx, rowsQuery, rowsArgs...)
 	if err != nil {
 		return err
 	}
@@ -1173,29 +1281,42 @@ func (r *Repository) UpdateRoles(ctx context.Context, requesterID, projectID, ma
 		return err
 	}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		`UPDATE project_members
-		 SET role = 'member'
-		 WHERE project_id = $1
-		   AND role = 'manager'
-		   AND user_id <> $2`,
-		projectID,
-		managerID,
-	); err != nil {
-		return err
-	}
+	if managerID != nil {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE project_members
+			 SET role = 'member'
+			 WHERE project_id = $1
+			   AND role = 'manager'
+			   AND user_id <> $2`,
+			projectID,
+			*managerID,
+		); err != nil {
+			return err
+		}
 
-	if _, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO project_members (project_id, user_id, role)
-		 VALUES ($1, $2, 'manager')
-		 ON CONFLICT (project_id, user_id) DO UPDATE
-		 SET role = EXCLUDED.role`,
-		projectID,
-		managerID,
-	); err != nil {
-		return err
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO project_members (project_id, user_id, role)
+			 VALUES ($1, $2, 'manager')
+			 ON CONFLICT (project_id, user_id) DO UPDATE
+			 SET role = EXCLUDED.role`,
+			projectID,
+			*managerID,
+		); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE project_members
+			 SET role = 'member'
+			 WHERE project_id = $1
+			   AND role = 'manager'`,
+			projectID,
+		); err != nil {
+			return err
+		}
 	}
 
 	if _, err := tx.ExecContext(

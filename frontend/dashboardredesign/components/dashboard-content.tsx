@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from 'next/navigation';
 import { Clock, Plus, X, Users, UserPlus, ChevronDown, Trash2 } from 'lucide-react';
 import { api, getApiErrorMessage, getCurrentUserId } from '@/lib/api';
 import { getFileUrl } from '@/lib/utils';
 import { unpackTaskBlocks } from '@/components/editor/taskBlockMeta';
+import { emitProjectsUpdated, PROJECTS_UPDATED_EVENT } from '@/lib/projects-events';
 
 type ProjectAPI = {
   id: string;
@@ -64,6 +65,7 @@ type DashboardProject = {
 
 type DashboardTaskCard = {
   id: string;
+  projectId: string;
   project: string;
   time: string;
   timeStatus: 'danger' | 'warning' | 'success';
@@ -272,6 +274,34 @@ function ProjectCard({ id, title, coverUrl, budget, deadline, onClick, onDelete 
   );
 }
 
+function TaskCardSkeleton() {
+  return (
+    <div className="animate-pulse rounded-[2.5rem] border-2 border-[#E2E2E2] bg-[#FBF9F7] p-8 dark:border-white/5 dark:bg-card">
+      <div className="mb-8 flex items-center justify-between">
+        <div className="h-4 w-32 rounded bg-gray-200 dark:bg-gray-700" />
+        <div className="h-7 w-24 rounded-full bg-gray-200 dark:bg-gray-700" />
+      </div>
+      <div className="space-y-3">
+        <div className="h-6 w-3/4 rounded bg-gray-200 dark:bg-gray-700" />
+        <div className="h-4 w-full rounded bg-gray-200 dark:bg-gray-700" />
+      </div>
+    </div>
+  );
+}
+
+function ProjectCardSkeleton() {
+  return (
+    <div className="animate-pulse overflow-hidden rounded-[2.5rem] border-2 border-[#E2E2E2] bg-[#FBF9F7] dark:border-white/5 dark:bg-card">
+      <div className="aspect-16/10 w-full bg-gray-200 dark:bg-gray-700" />
+      <div className="space-y-3 p-6">
+        <div className="h-5 w-2/3 rounded bg-gray-200 dark:bg-gray-700" />
+        <div className="h-4 w-full rounded bg-gray-200 dark:bg-gray-700" />
+        <div className="h-4 w-5/6 rounded bg-gray-200 dark:bg-gray-700" />
+      </div>
+    </div>
+  );
+}
+
 interface SectionHeaderProps {
   color: 'green' | 'red' | 'yellow';
   title: string;
@@ -434,17 +464,9 @@ export default function DashboardContent() {
     id: string;
     title: string;
   } | null>(null);
-  const [myTasks, setMyTasks] = useState<Array<{
-    id: string;
-    project: string;
-    time: string;
-    timeStatus: 'danger' | 'warning' | 'success';
-    title: string;
-    description: string;
-    responsible?: string;
-    deadline?: string | null;
-  }>>([]);
+  const [myTasks, setMyTasks] = useState<DashboardTaskCard[]>([]);
   const [subordinateTasks, setSubordinateTasks] = useState<DashboardTaskCard[]>([]);
+  const [subordinateProjects, setSubordinateProjects] = useState<DashboardProject[]>([]);
 
   // Task creation moved to dedicated page at /tasks/new
 
@@ -535,12 +557,16 @@ export default function DashboardContent() {
       return;
     }
 
+    const deletedProjectID = deleteProjectConfirm.id;
     setProjectsError(null);
     setIsDeletingProject(true);
     try {
-      await api.delete(`/projects/${deleteProjectConfirm.id}`);
-      setProjects((prev) => prev.filter((project) => project.id !== deleteProjectConfirm.id));
+      await api.delete(`/projects/${deletedProjectID}`);
+      setProjects((prev) => prev.filter((project) => project.id !== deletedProjectID));
+      setMyTasks((prev) => prev.filter((task) => task.projectId !== deletedProjectID));
+      setSubordinateTasks((prev) => prev.filter((task) => task.projectId !== deletedProjectID));
       setDeleteProjectConfirm(null);
+      emitProjectsUpdated();
     } catch (error) {
       setProjectsError(getApiErrorMessage(error, 'Не удалось удалить проект'));
     } finally {
@@ -548,124 +574,255 @@ export default function DashboardContent() {
     }
   };
 
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadProjects = async () => {
+  const loadProjects = useCallback(async (silent = false) => {
+    if (!silent) {
       setProjectsLoading(true);
       setProjectsError(null);
+    }
 
-      try {
-        const { data } = await api.get<ProjectAPI[]>('/projects');
-        if (cancelled) {
+    try {
+      const { data } = await api.get<ProjectAPI[]>('/projects');
+      const projectsList = Array.isArray(data) ? data : [];
+      const mapped = projectsList.map((project) => ({
+        id: project.id,
+        title: project.title,
+        coverUrl: project.coverUrl || project.cover_url || '',
+        budget: Number(project.budget ?? project.total_budget ?? 0),
+        deadline: project.deadline || project.end_date || null,
+      }));
+      setProjects(mapped);
+
+      const taskCards: DashboardTaskCard[] = [];
+      const subordinateTaskCards: DashboardTaskCard[] = [];
+
+      const currentUserId = getCurrentUserId();
+      const loadSubordinateTokens = async (): Promise<Set<string>> => {
+        const tokens = new Set<string>();
+        if (!currentUserId) {
+          return tokens;
+        }
+
+        const [subordinatesResult, hierarchyResult] = await Promise.allSettled([
+          api.get<SubordinateUser[]>(`/users/${currentUserId}/subordinates`),
+          api.get<HierarchyTreeResponse>('/hierarchy/tree'),
+        ]);
+
+        if (subordinatesResult.status === 'fulfilled') {
+          const directSubordinates = Array.isArray(subordinatesResult.value.data) ? subordinatesResult.value.data : [];
+          directSubordinates.forEach((user) => {
+            addUserTokens(tokens, user.id, user.email);
+          });
+        }
+
+        if (hierarchyResult.status === 'fulfilled') {
+          const hierarchyTree = Array.isArray(hierarchyResult.value.data?.tree) ? hierarchyResult.value.data.tree : [];
+          const hierarchySubordinates = collectHierarchySubordinateTokens(hierarchyTree, currentUserId);
+          hierarchySubordinates.forEach((token) => tokens.add(token));
+        }
+
+        return tokens;
+      };
+
+      const subordinateTokensPromise = loadSubordinateTokens();
+      const normalizedCurrentUserId = normalizeToken(currentUserId);
+      const canManageByProject = new Map<string, boolean>();
+      projectsList.forEach((project) => {
+        const currentUserRole = String(project.current_user_role || project.currentUserRole || '').toLowerCase();
+        canManageByProject.set(project.id, currentUserRole === 'owner' || currentUserRole === 'manager');
+      });
+
+      // Load members for each project to filter subordinate projects
+      const memberResults = await Promise.allSettled(
+        projectsList.map((project) => api.get<any[]>(`/projects/${project.id}/members`))
+      );
+
+      const stageResults = await Promise.allSettled(
+        projectsList.map((project) => api.get<StageAPI[]>(`/projects/${project.id}/stages`)),
+      );
+
+      const stageEntries: Array<{ project: ProjectAPI; stage: StageAPI }> = [];
+      stageResults.forEach((result, index) => {
+        if (result.status !== 'fulfilled') {
+          return;
+        }
+        const stages = Array.isArray(result.value.data) ? result.value.data : [];
+        stages.forEach((stage) => {
+          stageEntries.push({ project: projectsList[index], stage });
+        });
+      });
+
+      const taskResults = await Promise.allSettled(
+        stageEntries.map(({ stage }) => api.get<TaskAPI[]>(`/stages/${stage.id}/tasks`)),
+      );
+
+      const subordinateTokens = await subordinateTokensPromise;
+
+      // Filter projects that have subordinate members
+      const subordinateProjectsList: DashboardProject[] = [];
+      memberResults.forEach((result, index) => {
+        if (result.status !== 'fulfilled') {
+          return;
+        }
+        const project = projectsList[index];
+        const members = Array.isArray(result.value.data) ? result.value.data : [];
+        
+        // Check if any member is a subordinate
+        const hasSubordinateMember = members.some((member: any) => {
+          if (!member.user) return false;
+          const memberId = normalizeToken(member.user.id);
+          const memberEmail = normalizeToken(member.user.email);
+          return subordinateTokens.has(memberId) || subordinateTokens.has(memberEmail);
+        });
+
+        if (hasSubordinateMember) {
+          subordinateProjectsList.push(mapped[index]);
+        }
+      });
+
+      setSubordinateProjects(subordinateProjectsList);
+
+      taskResults.forEach((result, index) => {
+        if (result.status !== 'fulfilled') {
           return;
         }
 
-        const mapped = (Array.isArray(data) ? data : []).map((project) => ({
-          id: project.id,
-          title: project.title,
-          coverUrl: project.coverUrl || project.cover_url || '',
-          budget: Number(project.budget ?? project.total_budget ?? 0),
-          deadline: project.deadline || project.end_date || null,
-        }));
-        setProjects(mapped);
+        const entry = stageEntries[index];
+        const tasks = Array.isArray(result.value.data) ? result.value.data : [];
+        const canManageProjectTasks = canManageByProject.get(entry.project.id) || false;
 
-        const projectsList = Array.isArray(data) ? data : [];
-        const taskCards: DashboardTaskCard[] = [];
-        const subordinateTaskCards: DashboardTaskCard[] = [];
-
-        const currentUserId = getCurrentUserId();
-        let subordinateTokens = new Set<string>();
-        if (currentUserId) {
-          const { data: subordinateUsers } = await api.get<SubordinateUser[]>(`/users/${currentUserId}/subordinates`);
-          const directSubordinates = Array.isArray(subordinateUsers) ? subordinateUsers : [];
-          directSubordinates.forEach((user) => {
-            addUserTokens(subordinateTokens, user.id, user.email);
-          });
-
-          try {
-            const { data: hierarchyData } = await api.get<HierarchyTreeResponse>('/hierarchy/tree');
-            const hierarchyTree = Array.isArray(hierarchyData?.tree) ? hierarchyData.tree : [];
-            const hierarchySubordinates = collectHierarchySubordinateTokens(hierarchyTree, currentUserId);
-            hierarchySubordinates.forEach((token) => subordinateTokens.add(token));
-          } catch {
-            // Ignore hierarchy fallback errors and keep direct subordinate mapping only.
+        tasks.forEach((task) => {
+          if (isTaskCompletedStatus(task.status)) {
+            return;
           }
-        }
 
-        for (const project of projectsList) {
-          const { data: stagesData } = await api.get<StageAPI[]>(`/projects/${project.id}/stages`);
-          const stages = Array.isArray(stagesData) ? stagesData : [];
-          const currentUserRole = String(project.current_user_role || project.currentUserRole || '').toLowerCase();
-          const canManageProjectTasks = currentUserRole === 'owner' || currentUserRole === 'manager';
-          const normalizedCurrentUserId = normalizeToken(currentUserId);
+          const badge = getTaskTimeBadge(task.deadline);
+          const taskCard: DashboardTaskCard = {
+            id: task.id,
+            projectId: entry.project.id,
+            project: entry.project.title,
+            time: badge.time,
+            timeStatus: badge.timeStatus,
+            title: task.title || 'Новая задача',
+            description: `Этап: ${entry.stage.title}`,
+            deadline: task.deadline || null,
+          };
 
-          for (const stage of stages) {
-            const { data: tasksData } = await api.get<TaskAPI[]>(`/stages/${stage.id}/tasks`);
-            const tasks = Array.isArray(tasksData) ? tasksData : [];
+          taskCards.push(taskCard);
 
-            tasks.forEach((task) => {
-              if (isTaskCompletedStatus(task.status)) {
-                return;
-              }
+          const taskAssigneesFromBlocks = unpackTaskBlocks(task.blocks).assignees;
+          const taskAssigneesFromField = Array.isArray(task.assignees)
+            ? task.assignees.map((item) => String(item || '').trim()).filter(Boolean)
+            : [];
+          const normalizedTaskAssignees = [...taskAssigneesFromBlocks, ...taskAssigneesFromField]
+            .map((item) => normalizeToken(item))
+            .filter(Boolean);
 
-              const badge = getTaskTimeBadge(task.deadline);
-              const taskCard = {
-                id: task.id,
-                project: project.title,
-                time: badge.time,
-                timeStatus: badge.timeStatus,
-                title: task.title || 'Новая задача',
-                description: `Этап: ${stage.title}`,
-                deadline: task.deadline || null,
-              };
+          const hasSubordinateAssignee = subordinateTokens.size > 0
+            && normalizedTaskAssignees.some((token) => subordinateTokens.has(token));
 
-              taskCards.push(taskCard);
+          const hasDelegatedAssignee = canManageProjectTasks
+            && Boolean(normalizedCurrentUserId)
+            && normalizedTaskAssignees.length > 0
+            && normalizedTaskAssignees.some((token) => token !== normalizedCurrentUserId);
 
-              const taskAssigneesFromBlocks = unpackTaskBlocks(task.blocks).assignees;
-              const taskAssigneesFromField = Array.isArray(task.assignees)
-                ? task.assignees.map((item) => String(item || '').trim()).filter(Boolean)
-                : [];
-              const normalizedTaskAssignees = [...taskAssigneesFromBlocks, ...taskAssigneesFromField]
-                .map((item) => normalizeToken(item))
-                .filter(Boolean);
-
-              const hasSubordinateAssignee = subordinateTokens.size > 0
-                && normalizedTaskAssignees.some((token) => subordinateTokens.has(token));
-
-              const hasDelegatedAssignee = canManageProjectTasks
-                && normalizedTaskAssignees.length > 0
-                && normalizedTaskAssignees.some((token) => token !== normalizedCurrentUserId);
-
-              if (hasSubordinateAssignee || hasDelegatedAssignee) {
-                subordinateTaskCards.push(taskCard);
-              }
-            });
+          if (hasSubordinateAssignee || hasDelegatedAssignee) {
+            subordinateTaskCards.push(taskCard);
           }
-        }
+        });
+      });
 
-        setMyTasks(taskCards.slice(0, 30));
-        setSubordinateTasks(subordinateTaskCards.slice(0, 30));
-      } catch (error) {
-        if (!cancelled) {
-          setProjects([]);
-          setMyTasks([]);
-          setSubordinateTasks([]);
-          setProjectsError(getApiErrorMessage(error, 'Не удалось загрузить проекты'));
-        }
-      } finally {
-        if (!cancelled) {
-          setProjectsLoading(false);
-        }
+      setMyTasks(taskCards.slice(0, 30));
+      setSubordinateTasks(subordinateTaskCards.slice(0, 30));
+    } catch (error) {
+      if (!silent) {
+        setProjects([]);
+        setMyTasks([]);
+        setSubordinateTasks([]);
+        setProjectsError(getApiErrorMessage(error, 'Не удалось загрузить проекты'));
+      }
+    } finally {
+      if (!silent) {
+        setProjectsLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProjects(false);
+
+    const onProjectsUpdated = () => {
+      void loadProjects(true);
+    };
+    const onFocus = () => {
+      void loadProjects(true);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadProjects(true);
       }
     };
+    const timer = window.setInterval(() => {
+      if (!document.hidden) {
+        void loadProjects(true);
+      }
+    }, 8000);
 
-    void loadProjects();
+    window.addEventListener(PROJECTS_UPDATED_EVENT, onProjectsUpdated as EventListener);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
 
     return () => {
-      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener(PROJECTS_UPDATED_EVENT, onProjectsUpdated as EventListener);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
-  }, []);
+  }, [loadProjects]);
+
+  if (projectsLoading) {
+    return (
+      <main className="w-full max-w-7xl mx-auto px-4 md:px-6 py-8">
+        <div className="mb-8">
+          <SectionHeader color="green" title="Срочные задачи" count={0} />
+          <div className="mt-4 overflow-x-auto pb-2">
+            <div className="flex min-w-max gap-4">
+              {Array.from({ length: 3 }).map((_, idx) => (
+                <div key={`urgent-skeleton-${idx}`} className="w-96 shrink-0">
+                  <TaskCardSkeleton />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-8">
+          <SectionHeader color="red" title="Мои задачи" count={0} />
+          <div className="mt-4 overflow-x-auto pb-2">
+            <div className="flex min-w-max gap-4">
+              {Array.from({ length: 3 }).map((_, idx) => (
+                <div key={`my-skeleton-${idx}`} className="w-96 shrink-0">
+                  <TaskCardSkeleton />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-8">
+          <SectionHeader color="yellow" title="Проекты" count={0} />
+          <div className="mt-4 overflow-x-auto pb-2">
+            <div className="flex min-w-max gap-4">
+              {Array.from({ length: 3 }).map((_, idx) => (
+                <div key={`project-skeleton-${idx}`} className="w-96 shrink-0">
+                  <ProjectCardSkeleton />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="w-full max-w-7xl mx-auto px-4 md:px-6 py-8">
@@ -806,12 +963,12 @@ export default function DashboardContent() {
       {/* Subordinate Projects Section */}
       <div className="mb-8">
         <div className="flex items-center justify-between mb-4">
-          <SectionHeader color="yellow" title="Проекты подчиненных" count={projects.length} />
+          <SectionHeader color="yellow" title="Проекты подчиненных" count={subordinateProjects.length} />
           <AddButton text="Добавить проект" onClick={handleCreateProject} />
         </div>
         <div className="overflow-x-auto pb-2">
           <div className="flex gap-4 min-w-max">
-          {projects.map((project) => (
+          {subordinateProjects.map((project) => (
               <div key={project.id} className="w-96 shrink-0">
                 <ProjectCard
                   {...project}
@@ -822,6 +979,11 @@ export default function DashboardContent() {
           ))}
           </div>
         </div>
+        {subordinateProjects.length === 0 && (
+          <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+            Нет проектов с назначенными подчинёнными.
+          </p>
+        )}
       </div>
     </main>
   );

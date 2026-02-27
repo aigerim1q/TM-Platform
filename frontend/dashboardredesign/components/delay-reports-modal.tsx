@@ -11,6 +11,7 @@ type DelayReportEntity = {
   user_id: string;
   stage_id?: string | null;
   task_id?: string | null;
+  taskId?: string | null;
   message: string;
   created_at?: string;
   createdAt?: string;
@@ -25,6 +26,63 @@ interface DelayReportsModalProps {
   onClose: () => void;
   projectId?: string;
   taskId?: string;
+  isProjectOverviewMode?: boolean;
+  onChanged?: () => void | Promise<void>;
+}
+
+const PROJECT_OVERVIEW_PREFIX = '[PROJECT_OVERVIEW_DELAY]';
+
+function hasProjectOverviewPrefix(message?: string | null) {
+  return String(message || '').trim().startsWith(PROJECT_OVERVIEW_PREFIX);
+}
+
+function stripProjectOverviewPrefix(message?: string | null) {
+  const text = String(message || '').trim();
+  if (!hasProjectOverviewPrefix(text)) {
+    return text;
+  }
+
+  return text.slice(PROJECT_OVERVIEW_PREFIX.length).trim();
+}
+
+function extractDelayReason(message?: string | null) {
+  const text = stripProjectOverviewPrefix(message);
+  if (!text) {
+    return '';
+  }
+
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (/^(почему просрочка:|причина просрочки:)/i.test(line)) {
+      return line.replace(/^(почему просрочка:|причина просрочки:)/i, '').trim();
+    }
+  }
+
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const reasonMatch = oneLine.match(/(?:почему просрочка:|причина просрочки:)\s*(.+)$/i);
+  if (reasonMatch?.[1]?.trim()) {
+    return reasonMatch[1].trim();
+  }
+
+  const cleaned = lines
+    .filter((line) => !/^(кто автор:|кто пишет:)/i.test(line))
+    .join(' ')
+    .trim();
+
+  return cleaned || text;
+}
+
+function isDelayReasonReportMessage(message?: string | null) {
+  const text = stripProjectOverviewPrefix(message).toLowerCase().trim();
+  if (!text) {
+    return false;
+  }
+
+  return text.includes('почему просрочка') || text.includes('причина просрочки');
 }
 
 function getInitials(email: string) {
@@ -65,27 +123,35 @@ function formatCreatedAt(value?: string) {
   });
 }
 
-export default function DelayReportsModal({ isOpen, onClose, projectId, taskId }: DelayReportsModalProps) {
+export default function DelayReportsModal({ isOpen, onClose, projectId, taskId, isProjectOverviewMode = false, onChanged }: DelayReportsModalProps) {
   const [reports, setReports] = useState<DelayReportEntity[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [message, setMessage] = useState('');
+  const [reasonLine, setReasonLine] = useState('');
   const [error, setError] = useState<string | null>(null);
 
-  const canSubmit = message.trim().length > 0 && !isSaving;
+  const canSubmit = reasonLine.trim().length > 0 && !isSaving;
 
   const sortedReports = useMemo(() => {
     const filtered = taskId
-      ? reports.filter((item) => (item.task_id || '').trim() === taskId)
-      : reports;
+      ? reports.filter((item) => {
+          const reportTaskID = String(item.task_id || item.taskId || '').trim();
+          return reportTaskID === taskId && isDelayReasonReportMessage(item.message);
+        })
+      : isProjectOverviewMode
+        ? reports.filter((item) => {
+            const linkedTaskId = String(item.task_id || item.taskId || '').trim();
+            return !linkedTaskId && hasProjectOverviewPrefix(item.message) && isDelayReasonReportMessage(item.message);
+          })
+        : reports.filter((item) => isDelayReasonReportMessage(item.message));
 
     return [...filtered].sort((a, b) => {
       const aTime = new Date(a.created_at || a.createdAt || '').getTime();
       const bTime = new Date(b.created_at || b.createdAt || '').getTime();
       return bTime - aTime;
     });
-  }, [reports, taskId]);
+  }, [isProjectOverviewMode, reports, taskId]);
 
   const loadReports = async () => {
     if (!projectId) return;
@@ -106,7 +172,7 @@ export default function DelayReportsModal({ isOpen, onClose, projectId, taskId }
     if (!isOpen || !projectId) return;
 
     setIsFormOpen(false);
-    setMessage('');
+    setReasonLine('');
     void loadReports();
   }, [isOpen, projectId]);
 
@@ -118,13 +184,18 @@ export default function DelayReportsModal({ isOpen, onClose, projectId, taskId }
     setIsSaving(true);
     setError(null);
     try {
+      const body = `Почему просрочка: ${reasonLine.trim()}`;
+      const message = isProjectOverviewMode
+        ? `${PROJECT_OVERVIEW_PREFIX} ${body}`
+        : body;
       await api.post(`/projects/${projectId}/delay-report`, {
         taskId: taskId || undefined,
-        message: message.trim(),
+        message,
       });
-      setMessage('');
+      setReasonLine('');
       setIsFormOpen(false);
       await loadReports();
+      await onChanged?.();
     } catch (e) {
       setError(getApiErrorMessage(e, 'Не удалось добавить причину просрочки'));
     } finally {
@@ -179,14 +250,17 @@ export default function DelayReportsModal({ isOpen, onClose, projectId, taskId }
 
           {isFormOpen && (
             <div className="mb-5 rounded-2xl border border-gray-200 bg-white p-4 dark:border-gray-700 dark:bg-gray-800">
-              <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">Причина</label>
-              <textarea
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                rows={4}
-                placeholder="Опишите причину просрочки"
-                className="w-full resize-none rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-yellow-500 focus:ring-2 focus:ring-yellow-200 dark:border-gray-600 dark:bg-gray-900 dark:text-white dark:focus:ring-yellow-900"
-              />
+              <div className="space-y-3">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-gray-700 dark:text-gray-300">Почему просрочка</label>
+                  <input
+                    value={reasonLine}
+                    onChange={(e) => setReasonLine(e.target.value)}
+                    placeholder="Коротко опишите причину"
+                    className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 outline-none focus:border-yellow-500 focus:ring-2 focus:ring-yellow-200 dark:border-gray-600 dark:bg-gray-900 dark:text-white dark:focus:ring-yellow-900"
+                  />
+                </div>
+              </div>
               <div className="mt-3 flex justify-end">
                 <button
                   type="button"
@@ -232,7 +306,10 @@ export default function DelayReportsModal({ isOpen, onClose, projectId, taskId }
                         </p>
                       </div>
                     </div>
-                    <p className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">{report.message}</p>
+                    <p className="whitespace-pre-wrap text-sm text-gray-700 dark:text-gray-300">
+                      <span className="text-gray-500 dark:text-gray-400">Почему просрочка:</span>{' '}
+                      {extractDelayReason(report.message)}
+                    </p>
                   </div>
                 );
               })}

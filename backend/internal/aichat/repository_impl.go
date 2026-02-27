@@ -64,12 +64,33 @@ type Message struct {
 
 func normalizeMode(mode string) string {
 	value := strings.ToLower(strings.TrimSpace(mode))
-	switch value {
-	case "ordinary", "template":
-		return value
-	default:
+
+	if value == "" {
 		return "template"
 	}
+
+	if len(value) > 120 {
+		value = value[:120]
+	}
+
+	for _, ch := range value {
+		isLetter := ch >= 'a' && ch <= 'z'
+		isDigit := ch >= '0' && ch <= '9'
+		isAllowedPunct := ch == ':' || ch == '-' || ch == '_' || ch == '.'
+		if !(isLetter || isDigit || isAllowedPunct) {
+			return "template"
+		}
+	}
+
+	if value == "ordinary" || value == "template" {
+		return value
+	}
+
+	if strings.HasPrefix(value, "template:") || strings.HasPrefix(value, "ordinary:") {
+		return value
+	}
+
+	return "template"
 }
 
 func normalizeSender(sender string) string {
@@ -196,4 +217,22 @@ func (r *Repository) AppendMessage(ctx context.Context, userID uuid.UUID, mode, 
 	_, _ = r.db.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at = now() WHERE id = $1`, threadID)
 
 	return m, nil
+}
+
+func (r *Repository) ResetMessages(ctx context.Context, userID uuid.UUID, mode string) error {
+	if err := r.ensureSchema(ctx); err != nil {
+		return err
+	}
+
+	threadID, err := r.ensureThread(ctx, userID, mode)
+	if err != nil {
+		return err
+	}
+
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM ai_chat_messages WHERE thread_id = $1`, threadID); err != nil {
+		return err
+	}
+
+	_, _ = r.db.ExecContext(ctx, `UPDATE ai_chat_threads SET updated_at = now() WHERE id = $1`, threadID)
+	return nil
 }
