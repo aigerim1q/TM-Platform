@@ -33,6 +33,16 @@ type authRequest struct {
 	Password string `json:"password"`
 }
 
+type registerRequest struct {
+	Email       string `json:"email"`
+	Password    string `json:"password"`
+	Name        string `json:"name"`
+	FullName    string `json:"full_name"`
+	FullNameAlt string `json:"fullName"`
+	FirstName   string `json:"first_name"`
+	LastName    string `json:"last_name"`
+}
+
 type refreshRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
@@ -108,7 +118,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("register: raw body: %s", string(bodyBytes))
 
-	var req authRequest
+	var req registerRequest
 	if err := json.Unmarshal(bodyBytes, &req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
@@ -130,7 +140,25 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.repo.CreateUser(r.Context(), req.Email, string(hash))
+	fullNameValue := strings.TrimSpace(req.FullName)
+	if fullNameValue == "" {
+		fullNameValue = strings.TrimSpace(req.FullNameAlt)
+	}
+	if fullNameValue == "" {
+		fullNameValue = strings.TrimSpace(req.Name)
+	}
+	if fullNameValue == "" {
+		first := strings.TrimSpace(req.FirstName)
+		last := strings.TrimSpace(req.LastName)
+		fullNameValue = strings.TrimSpace(strings.Join([]string{first, last}, " "))
+	}
+
+	var fullName *string
+	if fullNameValue != "" {
+		fullName = &fullNameValue
+	}
+
+	user, err := h.repo.CreateUser(r.Context(), req.Email, string(hash), fullName)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
@@ -844,13 +872,8 @@ func (h *Handler) canEditHierarchy(ctx context.Context, requesterID uuid.UUID, t
 		return false, err
 	}
 
-	// Root node and HR/CEO roles can edit hierarchy globally.
-	if requester.ManagerID == nil || hasHierarchyAdminRole(requester.Role) {
-		return true, nil
-	}
-
-	// Direct manager can edit subordinate.
-	if targetUser.ManagerID != nil && *targetUser.ManagerID == requesterID {
+	// Only CEO/HR authority can edit hierarchy globally.
+	if hasHierarchyAdminRole(requester.Role) || isHRDepartment(requester.DepartmentName) {
 		return true, nil
 	}
 
@@ -864,11 +887,24 @@ func hasHierarchyAdminRole(role *string) bool {
 
 	normalized := strings.ToLower(strings.TrimSpace(*role))
 	switch normalized {
-	case "ceo", "hr", "hr manager", "hr_manager", "human resources":
+	case "ceo", "hr", "hr manager", "hr_manager", "human resources", "hr specialist", "hr_specialist":
 		return true
 	default:
 		return false
 	}
+}
+
+func isHRDepartment(departmentName *string) bool {
+	if departmentName == nil {
+		return false
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(*departmentName))
+	if normalized == "" {
+		return false
+	}
+
+	return strings.Contains(normalized, "hr") || strings.Contains(normalized, "human resources") || strings.Contains(normalized, "кадр")
 }
 
 func buildUserResponse(user User) userResponse {

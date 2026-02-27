@@ -198,8 +198,9 @@ func (h *UploadHandler) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{
-		"url":      "/uploads/" + folderName + "/" + savedFileName,
-		"fileName": savedFileName,
+		"url":            "/uploads/" + folderName + "/" + savedFileName,
+		"fileName":       fileName,
+		"storedFileName": savedFileName,
 	})
 }
 

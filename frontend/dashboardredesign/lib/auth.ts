@@ -12,6 +12,8 @@ type RegisterPayload = {
   org_id?: number;
   role?: string;
   name?: string;
+  full_name?: string;
+  fullName?: string;
   remember?: boolean;
 };
 
@@ -52,6 +54,8 @@ export async function register(payload: RegisterPayload) {
     const { data } = await api.post<UserResponse>("/auth/register", {
       email: payload.email,
       password: payload.password,
+      name: payload.name,
+      full_name: payload.full_name || payload.fullName || payload.name,
     });
 
     return data;

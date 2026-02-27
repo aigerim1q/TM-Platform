@@ -8,7 +8,7 @@ import { api, getApiErrorMessage } from '@/lib/api';
 import { getDisplayNameFromEmail } from '@/lib/utils';
 import { emitNotificationsUpdated, NOTIFICATIONS_UPDATED_EVENT } from '@/lib/notifications-events';
 
-type NotificationKind = 'project_created' | 'task_delegated' | 'project_member' | 'task_comment' | 'call_invite';
+type NotificationKind = 'project_created' | 'task_delegated' | 'task_assigned' | 'project_member' | 'task_comment' | 'call_invite';
 
 type NotificationItem = {
   id: string;
@@ -51,6 +51,8 @@ function kindIcon(kind: NotificationKind) {
       return <Calendar className="h-5 w-5 text-emerald-600" />;
     case 'task_delegated':
       return <ArrowRight className="h-5 w-5 text-amber-600" />;
+    case 'task_assigned':
+      return <UserPlus className="h-5 w-5 text-sky-600" />;
     case 'project_member':
       return <UserPlus className="h-5 w-5 text-violet-600" />;
     case 'call_invite':

@@ -237,7 +237,8 @@ func (r *Repository) ListTaskHistory(ctx context.Context, requesterID, taskID uu
 
 	rows, err := r.db.QueryContext(
 		ctx,
-		`SELECT dr.id, dr.project_id, dr.user_id, dr.stage_id, dr.task_id, dr.message, dr.created_at, u.id, u.email
+		`SELECT dr.id, dr.project_id, dr.user_id, dr.stage_id, dr.task_id, dr.message, dr.created_at, u.id, u.email,
+		 	COALESCE((SELECT COUNT(*) FROM delay_report_comments c WHERE c.report_id = dr.id), 0) AS comments_count
 		 FROM delay_reports dr
 		 JOIN users u ON u.id = dr.user_id
 		 WHERE dr.task_id = $1

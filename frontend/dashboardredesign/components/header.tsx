@@ -1,10 +1,10 @@
 'use client';
 
-import { MessageCircle, Moon, Bell } from 'lucide-react';
+import { MessageCircle, Bell } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import ChatsDropdown from './chats-dropdown';
-import { useTheme } from 'next-themes';
+import ThemeToggleAnimated from './theme-toggle-animated';
 import { api } from '@/lib/api';
 import { getAccessToken, getCurrentUserId } from '@/lib/api';
 import { getChatUnreadCount, touchChatPresence } from '@/lib/chats';
@@ -22,16 +22,10 @@ export default function Header() {
   const router = useRouter();
   const pathname = usePathname();
   const [isChatsOpen, setIsChatsOpen] = useState(false);
-  const { theme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [unreadCount, setUnreadCount] = useState(0);
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
   const [profile, setProfile] = useState<HeaderProfile | null>(null);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -170,7 +164,8 @@ export default function Header() {
   }, [pathname]);
 
   const profileName = profile?.full_name?.trim() || getDisplayNameFromEmail(profile?.email);
-  const profileAvatar = getFileUrl(profile?.avatar_url) || profile?.avatar_url || 'https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?ixlib=rb-1.2.1&auto=format&fit=facearea&facepad=2&w=256&h=256&q=80';
+  const profileAvatar = getFileUrl(profile?.avatar_url) || profile?.avatar_url || '';
+  const profileInitial = String(profileName || 'U').trim().charAt(0).toUpperCase() || 'U';
   const profileEmail = profile?.email || 'user@example.com';
 
   const isLifecyclePage = pathname === '/lifecycle';
@@ -278,48 +273,22 @@ export default function Header() {
               <ChatsDropdown isOpen={isChatsOpen} onClose={() => setIsChatsOpen(false)} />
             </div>
 
-            <button
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              className="text-[#8B5CF6] hover:text-[#7C3AED] dark:text-amber-400 dark:hover:text-amber-300 transition-colors"
-            >
-              {mounted && (
-                <>
-                  <Moon size={22} fill={theme === 'dark' ? "currentColor" : "none"} className={theme === 'dark' ? "hidden" : "block"} />
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="24"
-                    height="24"
-                    viewBox="0 0 24 24"
-                    fill="currentColor"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className={`lucide lucide-sun ${theme === 'dark' ? 'block' : 'hidden'}`}
-                  >
-                    <circle cx="12" cy="12" r="4" />
-                    <path d="M12 2v2" />
-                    <path d="M12 20v2" />
-                    <path d="m4.93 4.93 1.41 1.41" />
-                    <path d="m17.66 17.66 1.41 1.41" />
-                    <path d="M2 12h2" />
-                    <path d="M20 12h2" />
-                    <path d="m6.34 17.66-1.41 1.41" />
-                    <path d="m19.07 4.93-1.41 1.41" />
-                  </svg>
-                </>
-              )}
-              {!mounted && <Moon size={22} />}
-            </button>
+            <ThemeToggleAnimated className="text-[#8B5CF6] hover:text-[#7C3AED] dark:text-amber-400 dark:hover:text-amber-300 transition-colors" />
             <button
               onClick={handleProfileClick}
               className="h-9 w-9 overflow-hidden rounded-full ring-2 ring-transparent hover:ring-gray-200 transition-all"
             >
-              <img
-                src={profileAvatar}
-                alt="User avatar"
-                className="h-full w-full object-cover"
-              />
+              {profileAvatar ? (
+                <img
+                  src={profileAvatar}
+                  alt="User avatar"
+                  className="h-full w-full object-cover"
+                />
+              ) : (
+                <span className="flex h-full w-full items-center justify-center bg-amber-500 text-xs font-semibold text-white">
+                  {profileInitial}
+                </span>
+              )}
             </button>
           </div>
 
@@ -404,50 +373,24 @@ export default function Header() {
           <div className="mt-auto pt-8 border-t border-gray-100 dark:border-white/10">
             <div className="flex items-center justify-between mb-6">
               <span className="text-gray-500 dark:text-gray-400">Тема</span>
-              <button
-                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-                className="p-2 rounded-full bg-gray-100 dark:bg-white/10 text-gray-900 dark:text-white"
-              >
-                {mounted && (
-                  <>
-                    <Moon size={22} className={theme === 'dark' ? "hidden" : "block"} />
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="24"
-                      height="24"
-                      viewBox="0 0 24 24"
-                      fill="currentColor"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                      className={`lucide lucide-sun ${theme === 'dark' ? 'block' : 'hidden'}`}
-                    >
-                      <circle cx="12" cy="12" r="4" />
-                      <path d="M12 2v2" />
-                      <path d="M12 20v2" />
-                      <path d="m4.93 4.93 1.41 1.41" />
-                      <path d="m17.66 17.66 1.41 1.41" />
-                      <path d="M2 12h2" />
-                      <path d="M20 12h2" />
-                      <path d="m6.34 17.66-1.41 1.41" />
-                      <path d="m19.07 4.93-1.41 1.41" />
-                    </svg>
-                  </>
-                )}
-                {!mounted && <Moon size={22} />}
-              </button>
+              <ThemeToggleAnimated className="p-2 rounded-full bg-gray-100 dark:bg-white/10 text-gray-900 dark:text-white" />
             </div>
             <button
               onClick={handleProfileClick}
               className="flex w-full items-center gap-4 p-2 rounded-2xl bg-gray-50 dark:bg-white/5 text-left"
             >
               <div className="h-10 w-10 overflow-hidden rounded-full">
-                <img
-                  src={profileAvatar}
-                  alt="User avatar"
-                  className="h-full w-full object-cover"
-                />
+                {profileAvatar ? (
+                  <img
+                    src={profileAvatar}
+                    alt="User avatar"
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <span className="flex h-full w-full items-center justify-center bg-amber-500 text-sm font-semibold text-white">
+                    {profileInitial}
+                  </span>
+                )}
               </div>
               <div>
                 <p className="font-semibold text-gray-900 dark:text-white">{profileName}</p>

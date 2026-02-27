@@ -360,9 +360,13 @@ type updateStatusRequest struct {
 }
 
 func (h *Handler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
-	currentUser, canManage, err := h.resolveCurrentUserAndPermission(r.Context())
+	_, canManage, err := h.resolveCurrentUserAndPermission(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	if !canManage {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
 
@@ -382,19 +386,6 @@ func (h *Handler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
 	if status != "free" && status != "busy" && status != "sick" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "status must be free, busy, or sick"})
 		return
-	}
-
-	// Any user can update their own status node
-	if !canManage {
-		nodeUserID, lookupErr := h.repo.GetNodeUserID(r.Context(), nodeID)
-		if lookupErr != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "node not found"})
-			return
-		}
-		if nodeUserID == nil || *nodeUserID != currentUser.ID {
-			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
-			return
-		}
 	}
 
 	if err := h.repo.UpdateStatus(r.Context(), nodeID, status); err != nil {
@@ -495,24 +486,52 @@ func (h *Handler) resolveCurrentUserAndPermission(ctx context.Context) (auth.Use
 		return auth.User{}, false, err
 	}
 
-	return user, hasManageAccess(user), nil
+	if hasManageAccess(user) {
+		return user, true, nil
+	}
+
+	hasAssignedHierarchyUser, err := h.repo.HasAssignedHierarchyUser(ctx)
+	if err != nil {
+		return auth.User{}, false, err
+	}
+
+	// Bootstrap mode: allow first logged-in user to configure hierarchy
+	// (assign first CEO) when hierarchy has no assigned users yet.
+	if !hasAssignedHierarchyUser {
+		return user, true, nil
+	}
+
+	hasCompanyAssignedUser, err := h.repo.HasCompanyAssignedUser(ctx)
+	if err != nil {
+		return auth.User{}, false, err
+	}
+
+	// Recovery mode: if company root has no CEO user assigned,
+	// allow a logged-in user to restore hierarchy ownership.
+	if !hasCompanyAssignedUser {
+		return user, true, nil
+	}
+
+	return user, false, nil
 }
 
 func hasManageAccess(user auth.User) bool {
-	if user.ManagerID == nil {
-		return true
-	}
-	if user.Role == nil {
-		return false
+	if user.Role != nil {
+		normalizedRole := strings.ToLower(strings.TrimSpace(*user.Role))
+		switch normalizedRole {
+		case "owner", "ceo", "hr", "hr manager", "hr_manager", "human resources", "hr specialist", "hr_specialist":
+			return true
+		}
 	}
 
-	normalized := strings.ToLower(strings.TrimSpace(*user.Role))
-	switch normalized {
-	case "owner", "ceo", "hr", "hr manager", "hr_manager", "human resources":
-		return true
-	default:
-		return false
+	if user.DepartmentName != nil {
+		normalizedDepartment := strings.ToLower(strings.TrimSpace(*user.DepartmentName))
+		if strings.Contains(normalizedDepartment, "hr") || strings.Contains(normalizedDepartment, "human resources") || strings.Contains(normalizedDepartment, "кадр") {
+			return true
+		}
 	}
+
+	return false
 }
 
 func parseOptionalUUID(value *string) (*uuid.UUID, error) {

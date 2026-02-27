@@ -9,6 +9,7 @@ import { packTaskBlocks, unpackTaskBlocks, type EditorBlock } from '@/components
 import { api, getApiErrorMessage, getApiStatus, getCurrentUserId } from '@/lib/api';
 import { useProject } from '@/hooks/useProject';
 import { getDisplayNameFromEmail } from '@/lib/utils';
+import LoadingSplash from '@/components/loading-splash';
 
 type TaskResponse = {
   id: string;
@@ -71,11 +72,13 @@ export default function ProjectTaskPage() {
   const [commentText, setCommentText] = useState('');
   const [isSendingComment, setIsSendingComment] = useState(false);
   const [activeTab, setActiveTab] = useState<'comments' | 'history'>('comments');
+  const [isDelayModalOpen, setIsDelayModalOpen] = useState(false);
+  const [delayReason, setDelayReason] = useState('');
+  const [isSubmittingDelay, setIsSubmittingDelay] = useState(false);
 
   const projectId = task?.project_id || '';
   const { project, refresh } = useProject(projectId || undefined);
   const userRole = (project?.current_user_role || project?.currentUserRole || 'member') as 'owner' | 'manager' | 'member';
-  const canManage = userRole === 'owner' || userRole === 'manager';
   const currentUserId = getCurrentUserId();
 
   const stageTitle = useMemo(() => {
@@ -96,6 +99,7 @@ export default function ProjectTaskPage() {
     const normalizedAssignees = new Set(assignees.map((item) => normalizeToken(item)).filter(Boolean));
     return normalizedAssignees.has(normalizedUserID);
   }, [assignees, currentUserId, userRole]);
+  const canManage = canWrite;
 
   const loadTask = async () => {
     if (!taskId) return;
@@ -168,6 +172,35 @@ export default function ProjectTaskPage() {
     }
   };
 
+  const openDelayModal = () => {
+    if (!canWrite) {
+      setError('Только назначенные участники могут указать причину просрочки');
+      return;
+    }
+
+    setError(null);
+    setDelayReason('');
+    setIsDelayModalOpen(true);
+  };
+
+  const handleDelaySubmit = async () => {
+    const reason = delayReason.trim();
+
+    if (!reason) {
+      setError('Заполните причину просрочки');
+      return;
+    }
+
+    setIsSubmittingDelay(true);
+    try {
+      await updateStatus('delayed', `Почему просрочка: ${reason}`);
+      setIsDelayModalOpen(false);
+      setDelayReason('');
+    } finally {
+      setIsSubmittingDelay(false);
+    }
+  };
+
   const handleSendComment = async () => {
     const text = commentText.trim();
     if (!text || !taskId || isSendingComment || !canWrite) {
@@ -197,7 +230,7 @@ export default function ProjectTaskPage() {
       <div className="min-h-screen bg-white dark:bg-background pb-20">
         <Header />
         <main className="max-w-6xl mx-auto px-6 pt-24">
-          <p className="text-sm text-gray-500">Loading...</p>
+          <LoadingSplash compact title="Загружаем задачу" subtitle="Собираем данные задачи..." />
         </main>
       </div>
     );
@@ -253,7 +286,7 @@ export default function ProjectTaskPage() {
           Старт: {toDateLabel(task?.start_date || task?.startDate)}
           {' • '}
           Дедлайн: {toDateLabel(task?.deadline)}
-          {assignees.length > 0 ? ` • Исполнители: ${assignees.join(', ')}` : ''}
+          {assignees.length > 0 ? ` • Исполнители: ${assignees.length}` : ''}
         </p>
 
         <div className="mb-8 flex flex-wrap gap-3">
@@ -264,7 +297,7 @@ export default function ProjectTaskPage() {
             <CheckCircle2 className="h-4 w-4" /> Завершить задачу
           </button>
           <button
-            onClick={() => void updateStatus('delayed', 'Статус изменен: задача отложена')}
+            onClick={openDelayModal}
             className="inline-flex items-center gap-2 rounded-full border border-gray-300 px-5 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
           >
             <Clock3 className="h-4 w-4" /> Отложить задачу
@@ -406,6 +439,57 @@ export default function ProjectTaskPage() {
             ))}
         </section>
       </main>
+
+      {isDelayModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center p-0 sm:items-center sm:p-4">
+          <div
+            className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+            onClick={() => {
+              if (!isSubmittingDelay) {
+                setIsDelayModalOpen(false);
+              }
+            }}
+          />
+
+          <div className="relative z-10 w-full rounded-t-3xl border border-gray-200 bg-white p-5 shadow-2xl dark:border-gray-700 dark:bg-gray-900 sm:max-w-md sm:rounded-3xl">
+            <h3 className="mb-1 text-lg font-bold text-gray-900 dark:text-white">Проблема / статус</h3>
+            <p className="mb-4 text-sm text-gray-500 dark:text-gray-400">Укажите причину просрочки.</p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-semibold text-gray-600 dark:text-gray-300">Почему просрочка</label>
+                <textarea
+                  value={delayReason}
+                  onChange={(e) => setDelayReason(e.target.value)}
+                  placeholder="Коротко опишите причину"
+                  rows={3}
+                  className="w-full resize-none rounded-xl border border-gray-300 px-3 py-2 text-sm text-gray-900 outline-none focus:border-amber-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100"
+                  disabled={isSubmittingDelay}
+                />
+              </div>
+            </div>
+
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsDelayModalOpen(false)}
+                disabled={isSubmittingDelay}
+                className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 disabled:opacity-60 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDelaySubmit()}
+                disabled={isSubmittingDelay}
+                className="rounded-full bg-amber-600 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-60"
+              >
+                {isSubmittingDelay ? 'Сохранение...' : 'Сохранить'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

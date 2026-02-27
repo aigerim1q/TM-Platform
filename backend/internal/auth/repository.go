@@ -19,13 +19,14 @@ func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) CreateUser(ctx context.Context, email, passwordHash string) (User, error) {
+func (r *Repository) CreateUser(ctx context.Context, email, passwordHash string, fullName *string) (User, error) {
 	row := r.db.QueryRowContext(
 		ctx,
-		`INSERT INTO users (email, password_hash) VALUES ($1, $2)
-		 RETURNING id, NULL::TEXT AS full_name, NULL::TEXT AS avatar_url, email, password_hash, role, manager_id, department_id, NULL::TEXT AS department_name, created_at`,
+		`INSERT INTO users (email, password_hash, full_name) VALUES ($1, $2, $3)
+		 RETURNING id, full_name, avatar_url, email, password_hash, role, manager_id, department_id, NULL::TEXT AS department_name, created_at`,
 		email,
 		passwordHash,
+		fullName,
 	)
 
 	var user User
@@ -201,7 +202,7 @@ func (r *Repository) UpdateUserHierarchy(ctx context.Context, userID uuid.UUID, 
 	return user, err
 }
 
-func (r *Repository) UpdateUserProfile(ctx context.Context, userID uuid.UUID, email string, fullName *string, avatarURL *string) (User, error) {
+func (r *Repository) UpdateUserProfile(ctx context.Context, userID uuid.UUID, email string, fullName, avatarURL *string) (User, error) {
 	row := r.db.QueryRowContext(
 		ctx,
 		`WITH updated AS (

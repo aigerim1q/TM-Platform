@@ -10,6 +10,7 @@ type MediaBlockType = 'image' | 'video' | 'file';
 interface UploadResult {
   url?: string;
   fileName?: string;
+  storedFileName?: string;
 }
 
 interface EditorMediaDropzoneProps {
@@ -73,13 +74,17 @@ export default function EditorMediaDropzone({
         }
 
         const data = (await res.json()) as UploadResult;
-        if (!data.url || !data.fileName) {
+        if (!data.url) {
           throw new Error('invalid upload response');
         }
 
+        const originalName = String(picked.name || '').trim();
+        const responseFileName = String(data.fileName || '').trim();
+        const finalFileName = originalName || responseFileName || 'Вложение';
+
         onUploaded(blockId, {
           fileUrl: data.url,
-          fileName: data.fileName,
+          fileName: finalFileName,
           fileType: blockType,
           fileSize: picked.size,
         });

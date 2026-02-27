@@ -2,6 +2,7 @@
 
 import React, { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
 import { api, getApiErrorMessage } from '@/lib/api';
+import { PROJECTS_UPDATED_EVENT } from '@/lib/projects-events';
 
 export interface Task {
     id: string;
@@ -164,6 +165,11 @@ export function TaskProvider({ children }: { children: ReactNode }) {
     useEffect(() => {
         void refresh();
 
+        const onProjectsUpdated = () => {
+            void refresh();
+        };
+        window.addEventListener(PROJECTS_UPDATED_EVENT, onProjectsUpdated as EventListener);
+
         const intervalId = window.setInterval(() => {
             if (!document.hidden) {
                 void refresh();
@@ -171,6 +177,7 @@ export function TaskProvider({ children }: { children: ReactNode }) {
         }, 60000);
 
         return () => {
+            window.removeEventListener(PROJECTS_UPDATED_EVENT, onProjectsUpdated as EventListener);
             window.clearInterval(intervalId);
         };
     }, [refresh]);

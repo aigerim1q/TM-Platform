@@ -438,11 +438,8 @@ func (r *Repository) AssignUserToNode(ctx context.Context, parentNodeID, userID 
 		}
 
 		if existingType == NodeTypeCompany && parentType != NodeTypeCompany {
-			if _, execErr := tx.ExecContext(ctx, `UPDATE hierarchy_nodes SET user_id = NULL WHERE id = $1`, existingNodeID); execErr != nil {
-				err = execErr
-				return dbNode{}, err
-			}
-			lookupErr = sql.ErrNoRows
+			err = errors.New("cannot move current CEO from company root; assign another CEO first")
+			return dbNode{}, err
 		}
 	}
 
@@ -553,6 +550,37 @@ func (r *Repository) GetNodeUserID(ctx context.Context, id uuid.UUID) (*uuid.UUI
 	var userID *uuid.UUID
 	err := r.db.QueryRowContext(ctx, `SELECT user_id FROM hierarchy_nodes WHERE id = $1`, id).Scan(&userID)
 	return userID, err
+}
+
+func (r *Repository) HasAssignedHierarchyUser(ctx context.Context) (bool, error) {
+	var hasAssigned bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM hierarchy_nodes
+			WHERE user_id IS NOT NULL
+		)`).Scan(&hasAssigned)
+	if err != nil {
+		return false, err
+	}
+
+	return hasAssigned, nil
+}
+
+func (r *Repository) HasCompanyAssignedUser(ctx context.Context) (bool, error) {
+	var hasCompanyAssigned bool
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1
+			FROM hierarchy_nodes
+			WHERE type = 'company'
+			  AND user_id IS NOT NULL
+		)`).Scan(&hasCompanyAssigned)
+	if err != nil {
+		return false, err
+	}
+
+	return hasCompanyAssigned, nil
 }
 
 func (r *Repository) DeleteNode(ctx context.Context, id uuid.UUID) error {

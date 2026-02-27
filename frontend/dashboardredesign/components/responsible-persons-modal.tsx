@@ -92,7 +92,7 @@ export default function ResponsiblePersonsModal({
     }, [members]);
     const isReadOnlyMember = userRole === 'member';
 
-    const canSave = Boolean(projectId && roles.managerId) && !isSaving && !isReadOnlyMember;
+    const canSave = Boolean(projectId) && !isSaving && !isReadOnlyMember;
 
     useEffect(() => {
         if (!isOpen || !projectId) return;
@@ -165,6 +165,14 @@ export default function ResponsiblePersonsModal({
         if (mode === 'manager') {
             if (currentRole === 'owner') {
                 setError('Владелец проекта не может быть назначен менеджером');
+                return;
+            }
+
+            if (roles.managerId === user.id) {
+                setRoles((prev) => ({
+                    ...prev,
+                    managerId: '',
+                }));
                 return;
             }
 

@@ -1,11 +1,11 @@
 "use client";
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { Camera } from "lucide-react";
 
 import Header from "@/components/header";
-import { getApiErrorMessage, getApiStatus, getCurrentUserId } from "@/lib/api";
+import { clearTokens, getApiErrorMessage, getApiStatus, getCurrentUserId } from "@/lib/api";
 import {
   getUserProfile,
   uploadProfileImage,
@@ -15,6 +15,7 @@ import {
 import { getDisplayNameFromEmail, getFileUrl } from "@/lib/utils";
 
 export default function UserProfilePage() {
+  const router = useRouter();
   const params = useParams<{ id?: string | string[] }>();
   const rawId = params?.id;
   const userId = Array.isArray(rawId) ? rawId[0] || "" : rawId || "";
@@ -133,6 +134,12 @@ export default function UserProfilePage() {
   const displayName = fullName || getDisplayNameFromEmail(email || user?.email);
   const resolvedAvatar = getFileUrl(avatarUrl) || avatarUrl;
 
+  const handleLogout = () => {
+    clearTokens();
+    router.replace('/login');
+    router.refresh();
+  };
+
   return (
     <div className="min-h-screen bg-background">
       <Header />
@@ -223,6 +230,14 @@ export default function UserProfilePage() {
                   {saveError && (
                     <p className="text-center text-sm text-red-500">{saveError}</p>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="w-full rounded-xl border border-red-400/40 bg-red-500/10 py-3 text-sm font-semibold text-red-400 transition-colors hover:bg-red-500/20"
+                  >
+                    Выйти
+                  </button>
                 </div>
               )}
 

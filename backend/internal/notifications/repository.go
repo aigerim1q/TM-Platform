@@ -13,6 +13,7 @@ type Kind string
 const (
 	KindProjectCreated Kind = "project_created"
 	KindTaskDelegated  Kind = "task_delegated"
+	KindTaskAssigned   Kind = "task_assigned"
 	KindProjectMember  Kind = "project_member"
 	KindTaskComment    Kind = "task_comment"
 	KindCallInvite     Kind = "call_invite"

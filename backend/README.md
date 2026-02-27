@@ -24,6 +24,11 @@ backend/
 4. Start server:
    - `go run backend/cmd/server/main.go`
 
+## Migration Rules
+- Never rename or renumber existing migration files.
+- Never add a new migration with a number lower than current max version.
+- For schema drift fixes in existing environments, add a new forward-only normalization migration (idempotent `IF NOT EXISTS` / `IF EXISTS`).
+
 ## API
 - `POST /auth/register` {"email":"a@b.com","password":"pass"}
 - `POST /auth/login` {"email":"a@b.com","password":"pass"}

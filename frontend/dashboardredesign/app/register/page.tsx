@@ -60,6 +60,7 @@ export default function RegisterPage() {
       await registerUser({
         email: email.trim(),
         password,
+        name: `${firstName.trim()} ${lastName.trim()}`.trim(),
       });
 
       router.push("/login");

@@ -62,16 +62,7 @@ export function getCurrentUserId() {
 
   const payload = parseJwtPayload(token);
   const subject = payload?.sub;
-  if (typeof subject !== "string") {
-    return "";
-  }
-
-  const trimmed = subject.trim();
-  if (!trimmed || trimmed === "undefined" || trimmed === "null") {
-    return "";
-  }
-
-  return trimmed;
+  return typeof subject === "string" ? subject : "";
 }
 
 export function setTokens(tokens: AuthTokens) {
@@ -97,12 +88,65 @@ export const api = axios.create({
   },
 });
 
+function localizeApiError(message: string): string {
+  const normalized = message.trim().toLowerCase();
+
+  if (normalized === 'invalid credentials') return 'Неверный email или пароль';
+  if (normalized === 'email and password are required') return 'Введите email и пароль';
+  if (normalized === 'invalid email') return 'Некорректный email';
+  if (normalized === 'email already registered') return 'Этот email уже зарегистрирован';
+
+  if (normalized.includes('zhcp parser error') && normalized.includes('connection refused')) {
+    return 'Сервис парсера ЖЦП сейчас недоступен (connection refused). Проверьте, что контейнер zhcp-parser запущен, и повторите попытку.';
+  }
+
+  if (normalized.includes('parser returned unsuccessful result')) {
+    return 'Парсер не смог извлечь структуру из документа. Проверьте, что файл не поврежден и соответствует формату (.pdf, .docx, .txt).';
+  }
+
+  if (normalized.includes('zhcp parser error')) {
+    return 'Не удалось обработать документ парсером ЖЦП. Проверьте формат/содержимое файла и попробуйте снова.';
+  }
+
+  if (normalized.includes('zhcp-parser:8081') && normalized.includes('connection refused')) {
+    return 'Не удалось подключиться к zhcp-parser:8081. Запустите сервис парсера и попробуйте снова.';
+  }
+
+  if (normalized.includes('dial tcp') && normalized.includes('connection refused')) {
+    return 'Один из внутренних сервисов недоступен (connection refused). Проверьте docker compose и запущенные контейнеры.';
+  }
+
+  if (normalized.includes('request failed with status code')) {
+    return 'Сервис временно вернул ошибку. Попробуйте еще раз через минуту.';
+  }
+
+  if (normalized.includes('network error')) {
+    return 'Сетевая ошибка. Проверьте подключение и доступность сервисов.';
+  }
+
+  return message;
+}
+
 export function getApiErrorMessage(error: unknown, fallback = "Request failed") {
   const axiosError = error as AxiosError<{ error?: string }>;
   if (axiosError?.response?.data?.error) {
-    return String(axiosError.response.data.error);
+    return localizeApiError(String(axiosError.response.data.error));
   }
-  return fallback;
+
+  if (axiosError?.message) {
+    const msg = String(axiosError.message);
+    const normalized = msg.trim().toLowerCase();
+    const isTechnicalAxiosMessage =
+      normalized.includes('request failed with status code')
+      || normalized.includes('network error')
+      || normalized.includes('timeout');
+
+    if (!isTechnicalAxiosMessage) {
+      return localizeApiError(msg);
+    }
+  }
+
+  return localizeApiError(fallback);
 }
 
 export function getApiStatus(error: unknown) {

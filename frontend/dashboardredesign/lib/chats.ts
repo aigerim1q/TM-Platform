@@ -50,7 +50,7 @@ export type UploadKind = "image" | "video" | "file";
 
 type UploadResponse = {
   url: string;
-  fileName: string;
+  fileName?: string;
 };
 
 export async function touchChatPresence() {
@@ -142,7 +142,7 @@ export async function uploadChatAttachment(file: File) {
 
   return {
     url: data.url,
-    fileName: data.fileName,
+    fileName: String(data.fileName || '').trim() || file.name,
     type,
   };
 }
@@ -151,4 +151,3 @@ export function isOwnChatMessage(message: ChatMessage) {
   const currentUserID = getCurrentUserId();
   return Boolean(currentUserID) && currentUserID === message.sender_id;
 }
-

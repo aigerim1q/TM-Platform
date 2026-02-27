@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, ArrowUp, Sparkles } from 'lucide-react';
 import { api } from '@/lib/api';
+import { AI_CONTEXT_UPDATED_EVENT, type AIProjectContext, loadAIProjectContext } from '@/lib/ai-context';
 
 type PersistedMessage = {
   id: string;
@@ -138,8 +139,70 @@ function buildContextAnswer(projects: UserProject[], tasks: UserTask[]) {
   return `Текущий контекст пользователя:\n• Проектов: ${projects.length}\n• Задач: ${tasks.length}\n• Задач с дедлайном: ${withDeadline}\n• Задач без дедлайна: ${tasks.length - withDeadline}`;
 }
 
-function answerByPrompt(prompt: string, ctx: WorkspaceContext | null) {
+function extractContextTasks(context: AIProjectContext) {
+  return (context.parsedProject?.phases || [])
+    .flatMap((phase) => (phase.tasks || []).map((task) => ({
+      title: String(task?.name || '').trim() || 'Без названия',
+      deadline: String(task?.end_date || task?.start_date || '').trim() || undefined,
+      status: String(task?.status || '').trim() || 'todo',
+      projectTitle: context.projectTitle,
+    })));
+}
+
+function buildContextTasksAnswer(context: AIProjectContext) {
+  const tasks = extractContextTasks(context);
+  if (!tasks.length) return `По активному контексту «${context.projectTitle}» задачи не найдены.`;
+  return `Задачи активного контекста:\n${tasks
+    .slice(0, 8)
+    .map((t) => `• ${t.title} — ${formatDateRu(t.deadline)} (${t.projectTitle}, ${t.status})`)
+    .join('\n')}`;
+}
+
+function buildContextDeadlinesAnswer(context: AIProjectContext) {
+  const tasks = extractContextTasks(context);
+  const upcoming = tasks
+    .filter((t) => t.deadline && !Number.isNaN(new Date(t.deadline).getTime()))
+    .sort((a, b) => new Date(a.deadline as string).getTime() - new Date(b.deadline as string).getTime())
+    .slice(0, 5);
+
+  if (!upcoming.length) {
+    const projectDeadline = context.deadline ? formatDateRu(context.deadline) : 'без дедлайна';
+    return `По активному контексту:\n• Дедлайн проекта: ${projectDeadline}\n• Даты задач не найдены.`;
+  }
+
+  return `Ближайшие дедлайны активного контекста:\n${upcoming
+    .map((t) => `• ${t.title} — ${formatDateRu(t.deadline)} (${context.projectTitle})`)
+    .join('\n')}`;
+}
+
+function buildContextRiskAnswer(context: AIProjectContext) {
+  const tasks = extractContextTasks(context);
+  if (!tasks.length) return 'Для оценки рисков по активному контексту пока мало данных.';
+  const overdue = tasks.filter((t) => {
+    if (!t.deadline) return false;
+    const d = new Date(t.deadline);
+    return !Number.isNaN(d.getTime()) && d.getTime() < Date.now() && t.status !== 'done';
+  });
+  if (overdue.length > 0) return `Риски по активному контексту:\n• Просроченные задачи: ${overdue.length}`;
+  return 'Риски по активному контексту: критичных просрочек не видно.';
+}
+
+function answerByPrompt(prompt: string, ctx: WorkspaceContext | null, activeContext: AIProjectContext | null) {
   const q = prompt.toLowerCase();
+  if (activeContext) {
+    if (q.includes('привет') || q.includes('hello')) {
+      return `Контекст активен: ${activeContext.projectTitle}. Отвечаю только по этому контексту.`;
+    }
+    if (q.includes('проект')) return `Активный проект: ${activeContext.projectTitle}.`;
+    if (q.includes('задач')) return buildContextTasksAnswer(activeContext);
+    if (q.includes('дедлайн') || q.includes('срок')) return buildContextDeadlinesAnswer(activeContext);
+    if (q.includes('риск') || q.includes('проблем') || q.includes('просроч')) return buildContextRiskAnswer(activeContext);
+    if (q.includes('контекст') || q.includes('сводка') || q.includes('что у меня')) {
+      return `Текущий контекст: ${activeContext.projectTitle}. Этапов: ${activeContext.stagesCreated}, задач: ${activeContext.tasksCreated}.`;
+    }
+    return `Работаю только по активному контексту «${activeContext.projectTitle}». Уточните: задачи, дедлайны или риски.`;
+  }
+
   const projects = ctx?.projects || [];
   const tasks = ctx?.tasks || [];
 
@@ -164,15 +227,43 @@ export default function AIChatModal({ open, onClose }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [ctx, setCtx] = useState<WorkspaceContext | null>(null);
+  const [activeContext, setActiveContext] = useState<AIProjectContext | null>(null);
   const [loading, setLoading] = useState(false);
   const endRef = useRef<HTMLDivElement | null>(null);
+
+  const resolvedMode = useMemo(() => {
+    if (!activeContext) {
+      return 'ordinary';
+    }
+    const raw = `${activeContext.sourceFileName || ''}|${activeContext.importedAt || ''}|${activeContext.projectTitle || ''}`;
+    let hash = 0;
+    for (let i = 0; i < raw.length; i += 1) {
+      hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+    }
+    return `template:${hash.toString(16)}`;
+  }, [activeContext]);
 
   const initialGreeting = useMemo<ChatMessage>(() => ({
     id: 'greeting',
     sender: 'other',
-    text: 'Привет! Это мини-чат AI. Я веду историю диалога и отвечаю по вашим проектам/задачам: «мои проекты», «мои задачи», «ближайшие дедлайны», «риски», «советы/план».',
+    text: activeContext
+      ? `Контекст активен: ${activeContext.projectTitle}. Отвечаю только по выбранному контексту.`
+      : 'Привет! Это мини-чат AI. Я веду историю диалога и отвечаю по вашим проектам/задачам: «мои проекты», «мои задачи», «ближайшие дедлайны», «риски», «советы/план».',
     timestamp: formatTime(new Date()),
-  }), []);
+  }), [activeContext]);
+
+  useEffect(() => {
+    setActiveContext(loadAIProjectContext());
+
+    const handleContextUpdated = () => {
+      setActiveContext(loadAIProjectContext());
+    };
+
+    window.addEventListener(AI_CONTEXT_UPDATED_EVENT, handleContextUpdated as EventListener);
+    return () => {
+      window.removeEventListener(AI_CONTEXT_UPDATED_EVENT, handleContextUpdated as EventListener);
+    };
+  }, []);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -185,7 +276,7 @@ export default function AIChatModal({ open, onClose }: Props) {
 
     (async () => {
       try {
-        const { data } = await api.get<PersistedMessage[]>('/ai-chat/messages', { params: { mode: 'ordinary' } });
+        const { data } = await api.get<PersistedMessage[]>('/ai-chat/messages', { params: { mode: resolvedMode } });
         if (!mounted) return;
 
         if (Array.isArray(data) && data.length > 0) {
@@ -201,10 +292,14 @@ export default function AIChatModal({ open, onClose }: Props) {
     return () => {
       mounted = false;
     };
-  }, [open, initialGreeting]);
+  }, [initialGreeting, open, resolvedMode]);
 
   useEffect(() => {
     if (!open) return;
+    if (activeContext) {
+      setCtx(null);
+      return;
+    }
 
     let mounted = true;
     (async () => {
@@ -246,11 +341,11 @@ export default function AIChatModal({ open, onClose }: Props) {
     return () => {
       mounted = false;
     };
-  }, [open]);
+  }, [activeContext, open]);
 
   const persistMessage = async (sender: 'user' | 'other', text: string) => {
     try {
-      await api.post('/ai-chat/messages', { mode: 'ordinary', sender, text, projectInfo: null });
+      await api.post('/ai-chat/messages', { mode: resolvedMode, sender, text, projectInfo: null });
     } catch {
       // ignore persist errors in mini chat
     }
@@ -273,7 +368,7 @@ export default function AIChatModal({ open, onClose }: Props) {
     void persistMessage('user', prompt);
 
     await new Promise((resolve) => setTimeout(resolve, 850));
-    const answer = answerByPrompt(prompt, ctx);
+    const answer = answerByPrompt(prompt, ctx, activeContext);
 
     const aiMessage: ChatMessage = {
       id: `a-${Date.now()}`,

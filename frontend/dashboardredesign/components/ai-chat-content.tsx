@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import { Send, FileText, Phone, Video, MoreVertical, Sparkles, SquarePen, AlertTriangle, User, Plus, ArrowUp, ShieldCheck, ChevronRight } from 'lucide-react';
@@ -30,12 +30,6 @@ interface PersistedMessage {
     text: string;
     projectInfo?: ProjectInfo;
     createdAt: string;
-}
-
-interface AIChatContentProps {
-    chatId: number;
-    chatName: string;
-    chatAvatar: string;
 }
 
 type UserProject = {
@@ -90,7 +84,7 @@ function resolveProjectCardHref(href?: string) {
     return raw;
 }
 
-export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatContentProps) {
+export default function AIChatContent() {
     const searchParams = useSearchParams();
     const mode = searchParams.get('mode');
     const chatMode: 'template' | 'ordinary' = mode === 'ordinary' ? 'ordinary' : 'template';
@@ -98,13 +92,33 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [activeContext, setActiveContext] = useState<AIProjectContext | null>(null);
+    const [isContextReady, setIsContextReady] = useState(false);
     const [workspaceContext, setWorkspaceContext] = useState<WorkspaceContext | null>(null);
+
+    const resolvedMode = useMemo(() => {
+        if (chatMode === 'ordinary') {
+            return 'ordinary';
+        }
+
+        if (!activeContext) {
+            return 'template';
+        }
+
+        const raw = `${activeContext.sourceFileName || ''}|${activeContext.importedAt || ''}|${activeContext.projectTitle || ''}`;
+        let hash = 0;
+        for (let i = 0; i < raw.length; i += 1) {
+            hash = (hash * 31 + raw.charCodeAt(i)) >>> 0;
+        }
+        return `template:${hash.toString(16)}`;
+    }, [activeContext, chatMode]);
 
     useEffect(() => {
         setActiveContext(loadAIProjectContext());
+        setIsContextReady(true);
 
         const handleContextUpdated = () => {
             setActiveContext(loadAIProjectContext());
+            setIsContextReady(true);
         };
 
         window.addEventListener(AI_CONTEXT_UPDATED_EVENT, handleContextUpdated as EventListener);
@@ -114,6 +128,15 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
     }, []);
 
     useEffect(() => {
+        if (!isContextReady) {
+            return;
+        }
+
+        if (activeContext) {
+            setWorkspaceContext(null);
+            return;
+        }
+
         let isMounted = true;
 
         (async () => {
@@ -180,7 +203,7 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
         return () => {
             isMounted = false;
         };
-    }, []);
+    }, [activeContext, isContextReady]);
 
     useEffect(() => {
         let isMounted = true;
@@ -188,7 +211,7 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
         (async () => {
             try {
                 const { data } = await api.get<PersistedMessage[]>('/ai-chat/messages', {
-                    params: { mode: chatMode },
+                    params: { mode: resolvedMode },
                 });
 
                 if (!isMounted) return;
@@ -226,7 +249,7 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
         return () => {
             isMounted = false;
         };
-    }, [chatMode]);
+    }, [activeContext, resolvedMode]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     const scrollToBottom = () => {
@@ -240,7 +263,7 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
     const persistMessage = async (sender: 'user' | 'other', text: string, projectInfo?: ProjectInfo) => {
         try {
             await api.post('/ai-chat/messages', {
-                mode: chatMode,
+                mode: resolvedMode,
                 sender,
                 text,
                 projectInfo: projectInfo ?? null,
@@ -250,21 +273,18 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
         }
     };
 
-    const handleSendMessage = (e?: React.FormEvent) => {
-        if (e) e.preventDefault();
-        const prompt = input.trim();
+    const sendPrompt = useCallback((rawPrompt: string) => {
+        const prompt = rawPrompt.trim();
         if (!prompt) return;
 
         const userMessage: Message = {
-            id: messages.length + 1,
+            id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             text: prompt,
             sender: 'user',
             timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
         };
 
-        const newMessages = [...messages, userMessage];
-        setMessages(newMessages);
-        setInput('');
+        setMessages(prev => [...prev, userMessage]);
         void persistMessage('user', prompt);
 
         // AI Bot auto-reply logic with context support
@@ -280,6 +300,13 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
             } else {
                 const createProjectCmd = (lowerInput.includes('создай') || lowerInput.includes('создать')) && lowerInput.includes('проект');
                 const createTaskCmd = (lowerInput.includes('создай') || lowerInput.includes('создать')) && lowerInput.includes('задач');
+                const asksProjectCreationHelp = lowerInput.includes('проект')
+                    && (
+                        lowerInput.includes('как создать')
+                        || lowerInput.includes('как создавать')
+                        || lowerInput.includes('как правильно')
+                        || lowerInput.includes('какой командой')
+                    );
                 const asksContext = lowerInput.includes('контекст') || lowerInput.includes('что в файле') || lowerInput.includes('о чем') || lowerInput.includes('что загружено');
                 const asksDeadlines = lowerInput.includes('дедлайн') || lowerInput.includes('срок') || lowerInput.includes('когда сдача') || lowerInput.includes('до какого числа');
                 const asksRisks = lowerInput.includes('риск') || lowerInput.includes('проблем') || lowerInput.includes('узк');
@@ -343,12 +370,14 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
                             aiResponseText = getApiErrorMessage(error, 'Ошибка при создании проекта из контекста');
                         }
                     }
+                } else if (asksProjectCreationHelp) {
+                    aiResponseText = buildProjectCreationHelp(activeContext);
                 } else if (createTaskCmd) {
                     if (!activeContext) {
                         aiResponseText = 'Сначала загрузите контекст через «Добавить контекст», затем я смогу создать задачу по документу.';
                     } else 
                     if (!activeContext.projectId) {
-                        aiResponseText = 'Сначала создайте проект по контексту командой: «создай проект по контексту». '; 
+                        aiResponseText = 'Сначала создайте проект по контексту командой: «создай проект по контексту» или «создать проект по контексту». '; 
                     } else if (!activeContext.parsedProject) {
                         aiResponseText = 'Не найден распарсенный контекст. Загрузите файл через «Добавить контекст». '; 
                     } else {
@@ -379,15 +408,15 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
                         }
                     }
                 } else if (asksProjectsList) {
-                    aiResponseText = buildProjectsListAnswer(workspaceContext?.projects || []);
+                    aiResponseText = activeContext
+                        ? buildContextProjectsListAnswer(activeContext)
+                        : buildProjectsListAnswer(workspaceContext?.projects || []);
                 } else if (asksTasksList) {
-                    aiResponseText = buildTasksListAnswer(workspaceContext);
+                    aiResponseText = activeContext
+                        ? buildContextTasksListAnswer(activeContext)
+                        : buildTasksListAnswer(workspaceContext);
                 } else if (asksDeadlines) {
                     aiResponseText = buildDeadlineAnswer(activeContext, workspaceContext);
-                } else if (asksContext) {
-                    aiResponseText = activeContext
-                        ? buildContextSummary(activeContext)
-                        : buildWorkspaceSummary(workspaceContext);
                 } else if (asksRisks) {
                     aiResponseText = activeContext
                         ? buildRiskNotes(activeContext)
@@ -396,6 +425,10 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
                     aiResponseText = activeContext
                         ? buildAdvice(activeContext)
                         : buildWorkspaceAdvice(workspaceContext);
+                } else if (asksContext) {
+                    aiResponseText = activeContext
+                        ? buildDocumentAnswer(activeContext, prompt)
+                        : buildWorkspaceSummary(workspaceContext);
                 } else {
                     aiResponseText = activeContext
                         ? buildDocumentAnswer(activeContext, prompt)
@@ -416,6 +449,12 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
             void persistMessage('other', aiResponseText, projectInfo);
             })();
         }, 500);
+    }, [activeContext, resolvedMode, workspaceContext]);
+
+    const handleSendMessage = (e?: React.FormEvent) => {
+        if (e) e.preventDefault();
+        sendPrompt(input);
+        setInput('');
     };
 
     const suggestionCards = [
@@ -441,6 +480,28 @@ export default function AIChatContent({ chatId, chatName, chatAvatar }: AIChatCo
 
     return (
         <div className="flex-1 flex flex-col bg-[#F9F9FB] dark:bg-background h-full transition-colors">
+            {activeContext && (
+                <div className="px-6 pt-6">
+                    <div className="max-w-4xl mx-auto rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800/50 dark:bg-amber-900/20">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+                            Активный контекст
+                        </p>
+                        <h3 className="mt-1 text-base font-bold text-gray-900 dark:text-white">
+                            {buildContextTitle(activeContext)}
+                        </h3>
+                        <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">
+                            {buildContextDescription(activeContext)}
+                        </p>
+                        <p className="mt-2 text-xs text-gray-600 dark:text-gray-400">
+                            {buildContextMeta(activeContext)}
+                        </p>
+                        <p className="mt-1 text-[11px] text-gray-500 dark:text-gray-400">
+                            {buildContextExtra(activeContext)}
+                        </p>
+                    </div>
+                </div>
+            )}
+
             {/* Messages Area / Welcome Screen */}
             <div className="flex-1 overflow-y-auto px-6 pt-10">
                 {messages.length === 0 ? (
@@ -579,15 +640,27 @@ function formatDateRu(value: string) {
     return parsed.toLocaleDateString('ru-RU');
 }
 
+function formatDateTimeRu(value: string) {
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    return parsed.toLocaleString('ru-RU', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
+}
+
 function buildGreeting(ctx: AIProjectContext | null) {
-    const defaultText = 'Я твой AI-помощник. Задавай вопросы по контексту или документу.';
+    const defaultText = 'Я твой AI-помощник. Задавай вопросы по задачам и проектам. Чтобы создать проект, скажите: «создай проект» или «создать проект».';
     if (!ctx) return defaultText;
-    return `Контекст загружен: ${ctx.projectTitle}. Задайте вопрос: «что в контексте?», «какие риски?» или «дай советы по проекту».`;
+    return `Контекст активен: ${ctx.projectTitle}. Чтобы создать проект по документу, напишите: «создай проект по контексту» или «создать проект по контексту». Оба варианта правильные.`;
 }
 
 function buildHelloAnswer(ctx: AIProjectContext | null, workspace: WorkspaceContext | null) {
     if (ctx) {
-        return `Контекст активен: ${ctx.projectTitle}. Также вижу ваши проекты и задачи. Спросите: «мои проекты», «мои задачи», «ближайшие дедлайны», «риски».`;
+        return `Контекст активен: ${ctx.projectTitle}. Отвечаю только по этому контексту. Для создания проекта используйте: «создай проект по контексту» или «создать проект по контексту».`;
     }
 
     if (workspace && workspace.projects.length > 0) {
@@ -595,6 +668,14 @@ function buildHelloAnswer(ctx: AIProjectContext | null, workspace: WorkspaceCont
     }
 
     return 'Привет! Я готов помогать по вашим проектам и задачам. Если нужно, загрузите контекст через «Добавить контекст». ';
+}
+
+function buildProjectCreationHelp(ctx: AIProjectContext | null) {
+    if (!ctx) {
+        return 'Чтобы создать проект, сначала загрузите документ через «Добавить контекст», затем напишите: «создай проект по контексту» или «создать проект по контексту». Оба варианта правильные.';
+    }
+
+    return `Чтобы создать проект по текущему документу «${ctx.projectTitle}», напишите: «создай проект по контексту» или «создать проект по контексту». Оба варианта правильные.`;
 }
 
 function buildContextSummary(ctx: AIProjectContext) {
@@ -649,6 +730,16 @@ function buildAdvice(ctx: AIProjectContext) {
 }
 
 function buildDeadlineAnswer(ctx: AIProjectContext | null, workspace: WorkspaceContext | null) {
+    if (ctx) {
+        const projectDeadline = ctx.deadline ? formatDateRu(ctx.deadline) : 'не указан';
+        const nearest = getNearestTaskDeadlines(ctx, 5);
+        if (nearest.length === 0) {
+            return `По контексту:\n• Дедлайн проекта: ${projectDeadline}\n• По задачам в контексте даты дедлайнов не найдены.`;
+        }
+
+        return `По дедлайнам в активном контексте:\n• Дедлайн проекта: ${projectDeadline}\n• Ближайшие сроки задач:\n${nearest.map((x) => `  - ${x}`).join('\n')}`;
+    }
+
     if (workspace && workspace.upcomingTasks.length > 0) {
         const nearest = workspace.upcomingTasks.slice(0, 5).map((task) => {
             const projectTitle = task.projectTitle || 'Проект';
@@ -660,17 +751,7 @@ function buildDeadlineAnswer(ctx: AIProjectContext | null, workspace: WorkspaceC
         return `Ближайшие дедлайны по вашим задачам:\n${nearest.join('\n')}`;
     }
 
-    if (!ctx) {
-        return 'Пока не вижу дедлайнов. Проверьте доступ к проектам или загрузите контекст документа.';
-    }
-
-    const projectDeadline = ctx.deadline ? formatDateRu(ctx.deadline) : 'не указан';
-    const nearest = getNearestTaskDeadlines(ctx, 3);
-    if (nearest.length === 0) {
-        return `По документу:\n• Дедлайн проекта: ${projectDeadline}\n• По задачам в контексте даты дедлайнов не найдены.`;
-    }
-
-    return `По дедлайнам:\n• Дедлайн проекта: ${projectDeadline}\n• Ближайшие сроки задач:\n${nearest.map((x) => `  - ${x}`).join('\n')}`;
+    return 'Пока не вижу дедлайнов. Проверьте доступ к проектам или загрузите контекст документа.';
 }
 
 function buildProjectsListAnswer(projects: Array<UserProject | WorkspaceProject>) {
@@ -707,6 +788,35 @@ function buildTasksListAnswer(workspace: WorkspaceContext | null) {
         ? `\nИ ещё ${workspace.tasks.length - preview.length} задач(и).`
         : '';
     return `Ваши задачи:\n${preview.join('\n')}${suffix}`;
+}
+
+function buildContextProjectsListAnswer(ctx: AIProjectContext) {
+    const deadline = ctx.deadline ? formatDateRu(ctx.deadline) : 'без дедлайна';
+    return `Активный контекст содержит один проект:\n• ${ctx.projectTitle} — ${deadline}`;
+}
+
+function buildContextTasksListAnswer(ctx: AIProjectContext) {
+    const tasks = (ctx.parsedProject?.phases || [])
+        .flatMap((phase) => (phase.tasks || []).map((task) => ({
+            taskTitle: String(task?.name || '').trim() || 'Без названия',
+            phaseTitle: String(phase?.name || '').trim() || 'Без этапа',
+            deadline: String(task?.end_date || task?.start_date || '').trim(),
+            status: String(task?.status || '').trim() || 'не указан',
+        })));
+
+    if (tasks.length === 0) {
+        return `По активному контексту «${ctx.projectTitle}» задачи не найдены.`;
+    }
+
+    const preview = tasks.slice(0, 8).map((task) => {
+        const deadlineText = task.deadline ? formatDateRu(task.deadline) : 'без дедлайна';
+        return `• ${task.taskTitle} — ${deadlineText} (${task.phaseTitle}, ${task.status})`;
+    });
+
+    const suffix = tasks.length > preview.length
+        ? `\nИ ещё ${tasks.length - preview.length} задач(и) в этом контексте.`
+        : '';
+    return `Задачи активного контекста:\n${preview.join('\n')}${suffix}`;
 }
 
 function buildWorkspaceSummary(workspace: WorkspaceContext | null) {
@@ -786,6 +896,11 @@ function buildWorkspaceGenericAnswer(workspace: WorkspaceContext | null, questio
             : 'Просроченных задач не найдено.';
     }
 
+    const freeform = buildWorkspaceFreeformAnswer(workspace, question);
+    if (freeform) {
+        return freeform;
+    }
+
     return `Я понял запрос. У меня есть данные по ${workspace.projects.length} проектам и ${workspace.tasks.length} задачам. Уточните, что нужно: список проектов, задачи, дедлайны, риски или план действий.`;
 }
 
@@ -806,7 +921,163 @@ function buildDocumentAnswer(ctx: AIProjectContext, question: string) {
         return `В контексте документа по проекту «${ctx.projectTitle}» распознано примерно ${ctx.tasksCreated} задач.`;
     }
 
+    const freeform = buildContextFreeformAnswer(ctx, question);
+    if (freeform) {
+        return freeform;
+    }
+
     return `${buildContextSummary(ctx)}\n\nМогу ответить точнее, например: «какие дедлайны», «риски», «советы по ускорению», «какие этапы».`;
+}
+
+const RU_STOP_WORDS = new Set([
+    'и', 'или', 'а', 'но', 'как', 'что', 'где', 'когда', 'почему', 'зачем',
+    'это', 'этот', 'эта', 'эти', 'там', 'тут', 'вот', 'для', 'про', 'по', 'на',
+    'из', 'под', 'над', 'за', 'у', 'о', 'об', 'от', 'до', 'со', 'без', 'ли',
+    'мне', 'мы', 'вы', 'они', 'он', 'она', 'оно', 'я', 'к', 'в', 'с',
+]);
+
+function normalizeTextForSearch(value: string) {
+    return value
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function tokenizeQuestion(value: string) {
+    const normalized = normalizeTextForSearch(value);
+    if (!normalized) return [] as string[];
+    return normalized
+        .split(' ')
+        .map((token) => token.trim())
+        .filter((token) => token.length >= 2 && !RU_STOP_WORDS.has(token));
+}
+
+type SearchSnippet = {
+    title: string;
+    text: string;
+    type: 'project' | 'phase' | 'task';
+};
+
+function buildContextSnippets(ctx: AIProjectContext): SearchSnippet[] {
+    const snippets: SearchSnippet[] = [];
+    const projectTitle = String(ctx.projectTitle || ctx.parsedProject?.title || '').trim() || 'Проект';
+    const projectDescription = String(ctx.parsedProject?.description || '').trim();
+    snippets.push({
+        title: projectTitle,
+        text: `${projectTitle}. ${projectDescription}`,
+        type: 'project',
+    });
+
+    const phases = ctx.parsedProject?.phases || [];
+    phases.forEach((phase) => {
+        const phaseName = String(phase?.name || '').trim();
+        const phaseDeadline = String(phase?.end_date || phase?.start_date || '').trim();
+        const phaseText = `${phaseName}. Срок: ${phaseDeadline}.`;
+        if (phaseName) {
+            snippets.push({
+                title: phaseName,
+                text: phaseText,
+                type: 'phase',
+            });
+        }
+
+        (phase.tasks || []).forEach((task) => {
+            const taskName = String(task?.name || '').trim();
+            if (!taskName) return;
+            const taskStatus = String(task?.status || '').trim();
+            const taskDeadline = String(task?.end_date || task?.start_date || '').trim();
+            snippets.push({
+                title: taskName,
+                text: `${taskName}. Этап: ${phaseName || 'без этапа'}. Статус: ${taskStatus || 'не указан'}. Срок: ${taskDeadline || 'не указан'}.`,
+                type: 'task',
+            });
+        });
+    });
+
+    return snippets;
+}
+
+function scoreSnippet(tokens: string[], snippet: SearchSnippet) {
+    if (tokens.length === 0) return 0;
+
+    const haystack = normalizeTextForSearch(`${snippet.title} ${snippet.text}`);
+    let score = 0;
+    for (const token of tokens) {
+        if (haystack.includes(token)) {
+            score += 1;
+            if (normalizeTextForSearch(snippet.title).includes(token)) {
+                score += 1;
+            }
+        }
+    }
+    return score;
+}
+
+function buildContextFreeformAnswer(ctx: AIProjectContext, question: string) {
+    const tokens = tokenizeQuestion(question);
+    if (tokens.length === 0) {
+        return '';
+    }
+
+    const snippets = buildContextSnippets(ctx);
+    const ranked = snippets
+        .map((snippet) => ({ snippet, score: scoreSnippet(tokens, snippet) }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+
+    if (ranked.length === 0) {
+        return '';
+    }
+
+    const lines = ranked.map((item) => {
+        const label = item.snippet.type === 'task'
+            ? 'Задача'
+            : item.snippet.type === 'phase'
+                ? 'Этап'
+                : 'Проект';
+        return `• ${label}: ${item.snippet.title}`;
+    });
+
+    return `По вашему вопросу в контексте «${ctx.projectTitle}» нашёл релевантные пункты:\n${lines.join('\n')}\n\nЕсли нужно, уточните: дедлайны, риски, статус или конкретный этап.`;
+}
+
+function buildWorkspaceFreeformAnswer(workspace: WorkspaceContext, question: string) {
+    const tokens = tokenizeQuestion(question);
+    if (tokens.length === 0) {
+        return '';
+    }
+
+    const taskMatches = workspace.tasks
+        .map((task) => {
+            const title = String(task.title || 'Без названия').trim();
+            const project = String(task.projectTitle || '').trim();
+            const stage = String(task.stageTitle || '').trim();
+            const deadline = String(task.deadline || '').trim();
+            const text = `${title} ${project} ${stage} ${deadline} ${task.status || ''}`;
+            const score = scoreSnippet(tokens, { title, text, type: 'task' });
+            return {
+                title,
+                project,
+                deadline,
+                score,
+            };
+        })
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 5);
+
+    if (taskMatches.length === 0) {
+        return '';
+    }
+
+    const lines = taskMatches.map((task) => {
+        const deadlineText = task.deadline ? formatDateRu(task.deadline) : 'без дедлайна';
+        return `• ${task.title} — ${deadlineText}${task.project ? ` (${task.project})` : ''}`;
+    });
+
+    return `Нашёл по вашему запросу задачи:\n${lines.join('\n')}\n\nМогу детализировать по дедлайнам, рискам или разбивке по проектам.`;
 }
 
 function getNearestTaskDeadlines(ctx: AIProjectContext, limit: number) {
@@ -828,4 +1099,51 @@ function getNearestTaskDeadlines(ctx: AIProjectContext, limit: number) {
 
     rows.sort((a, b) => a.deadline.getTime() - b.deadline.getTime());
     return rows.slice(0, limit).map((x) => `${x.title} — ${x.deadline.toLocaleDateString('ru-RU')}`);
+}
+
+function buildContextTitle(ctx: AIProjectContext) {
+    const title = String(ctx.projectTitle || ctx.parsedProject?.title || '').trim();
+    if (title) {
+        return `Проект: ${title}`;
+    }
+
+    return ctx.sourceFileName ? `Документ: ${ctx.sourceFileName}` : 'Контекстный документ';
+}
+
+function buildContextDescription(ctx: AIProjectContext) {
+    const rawDescription = String(ctx.parsedProject?.description || '').trim();
+    if (rawDescription) {
+        return rawDescription;
+    }
+
+    const phaseNames = (ctx.parsedProject?.phases || [])
+        .map((phase) => String(phase?.name || '').trim())
+        .filter(Boolean)
+        .slice(0, 3);
+
+    if (phaseNames.length > 0) {
+        return `Кратко: проект включает этапы — ${phaseNames.join(', ')}.`;
+    }
+
+    return 'Краткое описание не найдено в распарсенном документе.';
+}
+
+function buildContextMeta(ctx: AIProjectContext) {
+    const deadline = ctx.deadline ? formatDateRu(ctx.deadline) : 'не указан';
+    const stages = ctx.stagesCreated || 0;
+    const tasks = ctx.tasksCreated || 0;
+    const tasksPerStage = stages > 0 ? (tasks / stages).toFixed(1) : '0.0';
+    return `Этапов: ${stages} • Задач: ${tasks} • На этап: ${tasksPerStage} • Дедлайн: ${deadline}`;
+}
+
+function buildContextExtra(ctx: AIProjectContext) {
+    const fileName = String(ctx.sourceFileName || '').trim() || 'не указан';
+    const importedAt = ctx.importedAt ? formatDateTimeRu(ctx.importedAt) : 'не указано';
+    const projectId = String(ctx.projectId || '').trim();
+
+    if (projectId) {
+        return `Файл: ${fileName} • Загружен: ${importedAt} • ID проекта: ${projectId}`;
+    }
+
+    return `Файл: ${fileName} • Загружен: ${importedAt}`;
 }

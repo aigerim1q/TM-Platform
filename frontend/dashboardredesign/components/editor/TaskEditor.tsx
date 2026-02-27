@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { DndContext, closestCenter, type DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -10,7 +10,7 @@ import AppSidebar from '@/components/app-sidebar';
 import EditorModeBadge from '@/components/editor-mode-badge';
 import { useAutosave } from '@/hooks/useAutosave';
 import { useProject } from '@/hooks/useProject';
-import { api, getApiErrorMessage } from '@/lib/api';
+import { api, getApiErrorMessage, getCurrentUserId } from '@/lib/api';
 import BlockRenderer from '@/components/editor/BlockRenderer';
 import { packTaskBlocks, unpackTaskBlocks, type EditorBlock, type EditorBlockType } from '@/components/editor/taskBlockMeta';
 
@@ -136,6 +136,7 @@ function ensureTrailingTextBlock(currentBlocks: EditorBlock[]) {
 export default function TaskEditor({ taskId }: { taskId: string }) {
   const router = useRouter();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   const [isLoadingTask, setIsLoadingTask] = useState(true);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -161,7 +162,28 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
   const userRole = (project?.current_user_role || project?.currentUserRole || '') as 'owner' | 'manager' | 'member' | '';
   const editorRole: 'owner' | 'manager' | 'member' = userRole === 'owner' || userRole === 'manager' || userRole === 'member' ? userRole : 'owner';
   const isRoleResolved = !projectId || project !== null;
-  const isReadOnly = Boolean(projectId) && (!isRoleResolved || userRole === 'member');
+  const currentUserId = useMemo(() => String(getCurrentUserId() || '').trim().toLowerCase(), []);
+  const returnToPath = useMemo(() => {
+    const raw = String(searchParams.get('returnTo') || '').trim();
+    return raw.startsWith('/') ? raw : '';
+  }, [searchParams]);
+  const normalizedTaskId = useMemo(
+    () => String(taskId || '').trim().replace(/^task-/, ''),
+    [taskId],
+  );
+  const taskDetailsPath = useMemo(
+    () => (normalizedTaskId ? `/project/task-${normalizedTaskId}` : ''),
+    [normalizedTaskId],
+  );
+
+  const isCurrentUserAssignee = useMemo(() => {
+    if (!currentUserId) {
+      return false;
+    }
+    const normalizedAssignees = new Set(assignees.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+    return normalizedAssignees.has(currentUserId);
+  }, [assignees, currentUserId]);
+  const isReadOnly = Boolean(projectId) && (!isRoleResolved || (userRole === 'member' && !isCurrentUserAssignee));
 
   const [blocks, setBlocks] = useState<EditorBlock[]>([{ id: crypto.randomUUID(), type: 'text', content: '' }]);
 
@@ -801,8 +823,11 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
         setSelectedStageId(String(data.stage_id));
       }
 
-      const normalizedTaskId = String(taskId || '').trim().replace(/^task-/, '');
-      router.push(`/project/task-${normalizedTaskId}`);
+      if (taskDetailsPath) {
+        router.push(taskDetailsPath);
+      } else {
+        router.push('/dashboard');
+      }
     } catch (error) {
       setSaveError(getApiErrorMessage(error, 'Не удалось сохранить задачу'));
     } finally {
@@ -820,6 +845,14 @@ export default function TaskEditor({ taskId }: { taskId: string }) {
             <button
               type="button"
               onClick={() => {
+                if (returnToPath) {
+                  router.push(returnToPath);
+                  return;
+                }
+                if (taskDetailsPath) {
+                  router.push(taskDetailsPath);
+                  return;
+                }
                 if (projectId) {
                   router.push(`/project-overview/${projectId}`);
                   return;
