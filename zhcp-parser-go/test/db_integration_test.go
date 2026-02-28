@@ -4,61 +4,13 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"zhcp-parser-go/internal/storage"
 	"zhcp-parser-go/internal/storage/sqlite"
-	"zhcp-parser-go/internal/transformers"
-	"zhcp-parser-go/internal/validators"
 )
 
-func TestFullDBFlow(t *testing.T) {
-	// 1. Setup Validation Logic
-	// We want to test that the requirements are met:
-	// - Project Name
-	// - Project Deadline
-	// - Count of Phases
-	// - Task Name
-	// - Task Responsibles (Array)
-	// - Task Deadline
-
-	// Create a VALID Project Structure
-	validProject := &transformers.ProjectStructure{
-		Project: transformers.Project{
-			Title:       "Valid Test Project",
-			Description: "A project that has all required fields",
-			Deadline:    "2026-12-31",
-			Phases: []transformers.Phase{
-				{
-					ID:          "P1",
-					Name:        "Phase 1",
-					Description: "First Phase",
-					StartDate:   "2026-01-01",
-					EndDate:     "2026-06-30",
-					Tasks: []transformers.Task{
-						{
-							ID:          "T1",
-							Name:        "Task 1",
-							Description: "A task with checks",
-							StartDate:   "2026-01-01",
-							EndDate:     "2026-01-31", // Task Deadline
-							Status:      "planned",
-							ResponsiblePersons: []transformers.ResponsiblePerson{
-								{Name: "John Doe", Role: "Manager"}, // Responsible
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// 2. Run Validator
-	val := validators.NewDBValidator()
-	missing := val.ValidateForDB(validProject)
-	if len(missing) > 0 {
-		t.Fatalf("Validation failed for valid project: %v", missing)
-	}
-
-	// 3. Create Temp DB
+func TestProjectAndTaskPersistence(t *testing.T) {
 	tempDir := t.TempDir()
 	dbPath := filepath.Join(tempDir, "test_zhcp.db")
 
@@ -68,51 +20,68 @@ func TestFullDBFlow(t *testing.T) {
 	}
 	defer store.Close()
 
-	// 4. Persist Project
-	res, err := store.PersistProjectStructure(context.Background(), validProject)
-	if err != nil {
-		t.Fatalf("Failed to persist project: %v", err)
-	}
-
-	if res.ProjectID == 0 {
-		t.Error("Returned ProjectID is 0")
-	}
-	if len(res.PhaseIDs) != 1 {
-		t.Errorf("Expected 1 PhaseID, got %d", len(res.PhaseIDs))
-	}
-	if len(res.TaskIDs) != 1 {
-		t.Errorf("Expected 1 TaskID, got %d", len(res.TaskIDs))
-	}
-
-	t.Logf("Successfully saved project ID %d to %s", res.ProjectID, dbPath)
-
-	// 5. Test INVALID Project (Missing Task Deadline and Responsible)
-	invalidProject := &transformers.ProjectStructure{
-		Project: transformers.Project{
-			Title:    "Invalid Project",
-			Deadline: "2026-12-31",
-			Phases: []transformers.Phase{
-				{
-					Name: "Phase 1",
-					Tasks: []transformers.Task{
-						{
-							Name: "Task Without Deadline/Resp",
-							// Missing EndDate
-							// Missing ResponsiblePersons
-						},
-					},
-				},
-			},
+	project := &storage.Project{
+		Title:       "Valid Test Project",
+		Description: "A project that has all required fields",
+		Status:      "planned",
+		Metadata: map[string]interface{}{
+			"source": "test",
 		},
 	}
-
-	missing = val.ValidateForDB(invalidProject)
-	if len(missing) == 0 {
-		t.Error("Validation should have failed for invalid project, but got 0 missing fields")
-	} else {
-		t.Logf("Correctly identified %d missing fields", len(missing))
-		for _, m := range missing {
-			t.Logf(" - %s", m)
-		}
+	if err := store.SaveProject(context.Background(), project); err != nil {
+		t.Fatalf("Failed to save project: %v", err)
 	}
+	if project.ID == "" {
+		t.Fatal("project id should be generated")
+	}
+
+	task := &storage.Task{
+		ProjectID:  project.ID,
+		Title:      "Task 1",
+		Status:     "pending",
+		Priority:   "high",
+		AssignedTo: "John Doe",
+		DueDate:    ptrTime(time.Now().Add(24 * time.Hour)),
+	}
+	if err := store.SaveTask(context.Background(), task); err != nil {
+		t.Fatalf("Failed to save task: %v", err)
+	}
+	if task.ID == "" {
+		t.Fatal("task id should be generated")
+	}
+
+	loadedProject, err := store.GetProject(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("Failed to load project: %v", err)
+	}
+	if loadedProject.Title != project.Title {
+		t.Fatalf("project title mismatch: got %q want %q", loadedProject.Title, project.Title)
+	}
+
+	tasks, err := store.ListTasks(context.Background(), project.ID)
+	if err != nil {
+		t.Fatalf("Failed to list tasks: %v", err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(tasks))
+	}
+	if tasks[0].Title != task.Title {
+		t.Fatalf("task title mismatch: got %q want %q", tasks[0].Title, task.Title)
+	}
+
+	if err := store.UpdateTaskStatus(context.Background(), task.ID, "completed"); err != nil {
+		t.Fatalf("Failed to update task status: %v", err)
+	}
+
+	updatedTask, err := store.GetTask(context.Background(), task.ID)
+	if err != nil {
+		t.Fatalf("Failed to load updated task: %v", err)
+	}
+	if updatedTask.Status != "completed" {
+		t.Fatalf("expected task status completed, got %q", updatedTask.Status)
+	}
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
 }

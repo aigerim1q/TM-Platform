@@ -5,6 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
 
 	"zhcp-parser-go/internal/ai"
 	"zhcp-parser-go/internal/ai/llm_providers/anthropic"
@@ -97,7 +102,17 @@ func startServer() {
 	log.Println("✅ Database initialized")
 
 	// Create and start HTTP server
-	srv := server.NewServer(zhcpParser, store, port)
+	srv := server.NewServer(zhcpParser, store, port, server.ServerOptions{
+		AllowedOrigins:    splitCSVEnv("PARSER_CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001,http://localhost:3002"),
+		Workers:           intEnv("PARSER_WORKERS", 4),
+		QueueSize:         intEnv("PARSER_QUEUE_SIZE", 64),
+		JobTTL:            durationEnvSeconds("PARSER_JOB_TTL_SEC", 1800),
+		ReadTimeout:       durationEnvSeconds("PARSER_READ_TIMEOUT_SEC", 20),
+		ReadHeaderTimeout: durationEnvSeconds("PARSER_READ_HEADER_TIMEOUT_SEC", 10),
+		WriteTimeout:      durationEnvSeconds("PARSER_WRITE_TIMEOUT_SEC", 30),
+		IdleTimeout:       durationEnvSeconds("PARSER_IDLE_TIMEOUT_SEC", 60),
+		ShutdownTimeout:   durationEnvSeconds("PARSER_SHUTDOWN_TIMEOUT_SEC", 10),
+	})
 	log.Printf("✅ Server configured on port %s\n", port)
 	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 	log.Println("📡 API Endpoints:")
@@ -115,7 +130,42 @@ func startServer() {
 	log.Println("  PUT    /api/tasks/{id}/status")
 	log.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-	if err := srv.Start(); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if err := srv.Start(ctx); err != nil {
 		log.Fatalf("❌ Server error: %v", err)
 	}
+}
+
+func splitCSVEnv(key, fallback string) []string {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		raw = fallback
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func intEnv(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func durationEnvSeconds(key string, fallback int) time.Duration {
+	return time.Duration(intEnv(key, fallback)) * time.Second
 }

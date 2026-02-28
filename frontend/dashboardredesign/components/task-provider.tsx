@@ -86,23 +86,23 @@ export function TaskProvider({ children }: { children: ReactNode }) {
             const { data: projectsData } = await api.get<ProjectEntity[]>('/projects');
             const projects = Array.isArray(projectsData) ? projectsData : [];
 
-            const projectDeadlineItems: Task[] = projects
-                .map((project) => {
-                    const deadline = normalizeDateOnly(project.deadline);
-                    if (!deadline) return null;
+            const projectDeadlineItems: Task[] = projects.flatMap((project) => {
+                const deadline = normalizeDateOnly(project.deadline);
+                if (!deadline) return [];
 
-                    return {
-                        id: `project-${project.id}`,
-                        title: `Проект: ${project.title || 'Без названия'}`,
-                        deadline,
-                        project: project.title || 'Без названия',
-                        projectId: project.id,
-                        source: 'project' as const,
-                        color: 'bg-amber-100 text-amber-700 border border-amber-200',
-                        type: 'milestone' as const,
-                    };
-                })
-                .filter((item): item is Task => Boolean(item));
+                const item: Task = {
+                    id: `project-${project.id}`,
+                    title: `Проект: ${project.title || 'Без названия'}`,
+                    deadline,
+                    project: project.title || 'Без названия',
+                    projectId: project.id,
+                    source: 'project',
+                    color: 'bg-amber-100 text-amber-700 border border-amber-200',
+                    type: 'milestone',
+                };
+
+                return [item];
+            });
 
             const stagesByProject = await Promise.all(
                 projects.map(async (project) => {
@@ -120,25 +120,25 @@ export function TaskProvider({ children }: { children: ReactNode }) {
                         stages.map(async (stage) => {
                             const { data: stageTasksData } = await api.get<StageTaskEntity[]>(`/stages/${stage.id}/tasks`);
                             const stageTasks = Array.isArray(stageTasksData) ? stageTasksData : [];
-                            return stageTasks
-                                .map((stageTask) => {
-                                    const deadline = normalizeDateOnly(stageTask.deadline);
-                                    if (!deadline) return null;
+                            return stageTasks.flatMap((stageTask) => {
+                                const deadline = normalizeDateOnly(stageTask.deadline);
+                                if (!deadline) return [];
 
-                                    return {
-                                        id: `task-${stageTask.id}`,
-                                        title: stageTask.title || 'Без названия задачи',
-                                        deadline,
-                                        status: stageTask.status || undefined,
-                                        project: project.title || 'Без названия',
-                                        projectId: project.id,
-                                        stage: stage.title || 'Этап',
-                                        source: 'task' as const,
-                                        color: getTaskColorByStatus(stageTask.status),
-                                        type: 'task' as const,
-                                    };
-                                })
-                                .filter((item): item is Task => Boolean(item));
+                                const item: Task = {
+                                    id: `task-${stageTask.id}`,
+                                    title: stageTask.title || 'Без названия задачи',
+                                    deadline,
+                                    status: stageTask.status || undefined,
+                                    project: project.title || 'Без названия',
+                                    projectId: project.id,
+                                    stage: stage.title || 'Этап',
+                                    source: 'task',
+                                    color: getTaskColorByStatus(stageTask.status),
+                                    type: 'task',
+                                };
+
+                                return [item];
+                            });
                         }),
                     );
 

@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"time"
 
 	"tm-platform-backend/internal/aichat"
 	"tm-platform-backend/internal/auth"
@@ -17,10 +18,10 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-func NewRouter(authHandler *auth.Handler, hierarchyHandler *hierarchy.Handler, projectsHandler *projects.HTTPHandler, uploadHandler *handlers.UploadHandler, projectFilesHandler *projectfiles.Handler, zhcpHandler *zhcp.Handler, aiChatHandler *aichat.Handler, notificationsHandler *notifications.Handler, chatsHandler *chats.Handler, authSvc *auth.Service) http.Handler {
+func NewRouter(authHandler *auth.Handler, hierarchyHandler *hierarchy.Handler, projectsHandler *projects.HTTPHandler, uploadHandler *handlers.UploadHandler, projectFilesHandler *projectfiles.Handler, zhcpHandler *zhcp.Handler, aiChatHandler *aichat.Handler, notificationsHandler *notifications.Handler, chatsHandler *chats.Handler, authSvc *auth.Service, allowedOrigins []string, readyCheck func() error) http.Handler {
 	r := chi.NewRouter()
 
-	r.Use(CORSMiddleware("http://localhost:3000"))
+	r.Use(CORSMiddleware(allowedOrigins))
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
@@ -31,9 +32,20 @@ func NewRouter(authHandler *auth.Handler, hierarchyHandler *hierarchy.Handler, p
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	r.Post("/upload", uploadHandler.Upload)
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if readyCheck != nil {
+			if err := readyCheck(); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("not-ready"))
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
 
 	r.Route("/auth", func(r chi.Router) {
+		r.Use(RateLimitByIP(30, time.Minute))
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 		r.Post("/refresh", authHandler.Refresh)
@@ -41,7 +53,9 @@ func NewRouter(authHandler *auth.Handler, hierarchyHandler *hierarchy.Handler, p
 
 	r.Group(func(r chi.Router) {
 		r.Use(auth.JwtMiddleware(authSvc))
+		r.With(RateLimitByIP(20, time.Minute)).Post("/upload", uploadHandler.Upload)
 		r.Get("/notifications", notificationsHandler.List)
+		r.Delete("/notifications", notificationsHandler.DeleteAll)
 		r.Get("/notifications/unread-count", notificationsHandler.UnreadCount)
 		r.Post("/notifications/read-all", notificationsHandler.MarkAllRead)
 		r.Post("/notifications/{id}/read", notificationsHandler.MarkRead)
@@ -106,6 +120,7 @@ func NewRouter(authHandler *auth.Handler, hierarchyHandler *hierarchy.Handler, p
 		r.Delete("/tasks/{id}", projectsHandler.DeleteTask)
 		r.Post("/project-files", projectFilesHandler.Create)
 		r.Get("/documents", projectFilesHandler.ListDocuments)
+		r.Get("/workspace/context", projectsHandler.WorkspaceContext)
 		r.Get("/users/{id}", authHandler.GetUserProfile)
 		r.Patch("/users/{id}/profile", authHandler.UpdateUserProfile)
 		r.Put("/users/{id}/hierarchy", authHandler.UpdateUserHierarchy)

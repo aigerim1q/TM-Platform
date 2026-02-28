@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { ArrowRight, Bell, Calendar, MessageSquare, UserPlus, X } from 'lucide-react';
-import { api, getAccessToken } from '@/lib/api';
+import { api } from '@/lib/api';
 import { emitNotificationsUpdated } from '@/lib/notifications-events';
 
 type NotificationKind = 'project_created' | 'task_delegated' | 'task_assigned' | 'project_member' | 'task_comment' | 'call_invite';
@@ -101,10 +101,6 @@ export default function LiveNotificationToaster() {
   }, [dismissToast]);
 
   const loadNotifications = useCallback(async () => {
-    if (!getAccessToken()) {
-      return;
-    }
-
     try {
       const { data } = await api.get<NotificationItem[]>('/notifications', {
         params: {

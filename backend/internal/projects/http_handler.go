@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -158,6 +159,41 @@ type HTTPHandler struct {
 	notificationsRepo *notifications.Repository
 }
 
+type workspaceStageItem struct {
+	ID        uuid.UUID `json:"id"`
+	ProjectID uuid.UUID `json:"project_id"`
+	Title     string    `json:"title"`
+}
+
+type workspaceTaskItem struct {
+	ID           uuid.UUID  `json:"id"`
+	StageID      uuid.UUID  `json:"stage_id"`
+	ProjectID    uuid.UUID  `json:"project_id"`
+	Title        string     `json:"title"`
+	Status       string     `json:"status"`
+	StartDate    *time.Time `json:"start_date,omitempty"`
+	Deadline     *time.Time `json:"deadline,omitempty"`
+	ProjectTitle string     `json:"projectTitle,omitempty"`
+	StageTitle   string     `json:"stageTitle,omitempty"`
+}
+
+type workspaceProjectItem struct {
+	ID       uuid.UUID            `json:"id"`
+	Title    string               `json:"title"`
+	Deadline *time.Time           `json:"deadline,omitempty"`
+	EndDate  *time.Time           `json:"end_date,omitempty"`
+	Status   ProjectStatus        `json:"status"`
+	Stages   []workspaceStageItem `json:"stages"`
+	Tasks    []workspaceTaskItem  `json:"tasks"`
+}
+
+type workspaceContextResponse struct {
+	Projects      []workspaceProjectItem `json:"projects"`
+	Tasks         []workspaceTaskItem    `json:"tasks"`
+	UpcomingTasks []workspaceTaskItem    `json:"upcomingTasks"`
+	LoadedAt      time.Time              `json:"loaded_at"`
+}
+
 func NewHTTPHandler(repo *Repository, notificationsRepo *notifications.Repository) *HTTPHandler {
 	return &HTTPHandler{repo: repo, notificationsRepo: notificationsRepo}
 }
@@ -185,29 +221,6 @@ func (h *HTTPHandler) notifyUsers(ctx context.Context, userIDs []uuid.UUID, acto
 			log.Printf("notification create failed: %v", err)
 		}
 	}
-}
-
-func (h *HTTPHandler) resolveAssigneeUserIDs(members []ProjectMemberResponse, assignees map[string]struct{}) []uuid.UUID {
-	if len(assignees) == 0 || len(members) == 0 {
-		return nil
-	}
-
-	ids := make([]uuid.UUID, 0)
-	for _, member := range members {
-		idRef := strings.ToLower(strings.TrimSpace(member.User.ID.String()))
-		emailRef := strings.ToLower(strings.TrimSpace(member.User.Email))
-		if _, ok := assignees[idRef]; ok {
-			ids = append(ids, member.User.ID)
-			continue
-		}
-		if emailRef != "" {
-			if _, ok := assignees[emailRef]; ok {
-				ids = append(ids, member.User.ID)
-			}
-		}
-	}
-
-	return ids
 }
 
 func roleTitle(role ProjectMemberRole) string {
@@ -477,6 +490,124 @@ func (h *HTTPHandler) ListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, responses)
+}
+
+func (h *HTTPHandler) WorkspaceContext(w http.ResponseWriter, r *http.Request) {
+	userID, err := userIDFromRequest(r)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": err.Error()})
+		return
+	}
+
+	projects, err := h.repo.ListByOwner(r.Context(), userID)
+	if err != nil {
+		log.Printf("WorkspaceContext projects failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load projects"})
+		return
+	}
+	stages, err := h.repo.ListStagesByUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("WorkspaceContext stages failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load stages"})
+		return
+	}
+	tasks, err := h.repo.ListTasksByUser(r.Context(), userID)
+	if err != nil {
+		log.Printf("WorkspaceContext tasks failed: %v", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load tasks"})
+		return
+	}
+
+	projectTitleByID := make(map[uuid.UUID]string, len(projects))
+	projectItems := make([]workspaceProjectItem, 0, len(projects))
+	stageItemsByProject := make(map[uuid.UUID][]workspaceStageItem, len(projects))
+	taskItemsByProject := make(map[uuid.UUID][]workspaceTaskItem, len(projects))
+
+	for _, project := range projects {
+		projectTitleByID[project.ID] = project.Title
+		projectItems = append(projectItems, workspaceProjectItem{
+			ID:       project.ID,
+			Title:    project.Title,
+			Deadline: project.Deadline,
+			EndDate:  project.EndDate,
+			Status:   project.Status,
+			Stages:   []workspaceStageItem{},
+			Tasks:    []workspaceTaskItem{},
+		})
+	}
+
+	stageTitleByID := make(map[uuid.UUID]string, len(stages))
+	stageProjectByID := make(map[uuid.UUID]uuid.UUID, len(stages))
+	for _, stage := range stages {
+		stageTitleByID[stage.ID] = stage.Title
+		stageProjectByID[stage.ID] = stage.ProjectID
+		stageItemsByProject[stage.ProjectID] = append(stageItemsByProject[stage.ProjectID], workspaceStageItem{
+			ID:        stage.ID,
+			ProjectID: stage.ProjectID,
+			Title:     stage.Title,
+		})
+	}
+
+	taskItems := make([]workspaceTaskItem, 0, len(tasks))
+	for _, task := range tasks {
+		taskProjectID := task.ProjectID
+		if taskProjectID == uuid.Nil {
+			if pid, ok := stageProjectByID[task.StageID]; ok {
+				taskProjectID = pid
+			}
+		}
+
+		item := workspaceTaskItem{
+			ID:           task.ID,
+			StageID:      task.StageID,
+			ProjectID:    taskProjectID,
+			Title:        task.Title,
+			Status:       task.Status,
+			StartDate:    task.StartDate,
+			Deadline:     task.Deadline,
+			ProjectTitle: projectTitleByID[taskProjectID],
+			StageTitle:   stageTitleByID[task.StageID],
+		}
+		taskItems = append(taskItems, item)
+		taskItemsByProject[taskProjectID] = append(taskItemsByProject[taskProjectID], item)
+	}
+
+	for idx := range projectItems {
+		projectID := projectItems[idx].ID
+		projectItems[idx].Stages = stageItemsByProject[projectID]
+		projectItems[idx].Tasks = taskItemsByProject[projectID]
+	}
+
+	upcoming := make([]workspaceTaskItem, 0)
+	now := time.Now().UTC()
+	for _, task := range taskItems {
+		if task.Deadline == nil {
+			continue
+		}
+		if task.Deadline.Before(now.AddDate(-10, 0, 0)) {
+			continue
+		}
+		upcoming = append(upcoming, task)
+	}
+	sort.Slice(upcoming, func(i, j int) bool {
+		if upcoming[i].Deadline == nil {
+			return false
+		}
+		if upcoming[j].Deadline == nil {
+			return true
+		}
+		return upcoming[i].Deadline.Before(*upcoming[j].Deadline)
+	})
+	if len(upcoming) > 10 {
+		upcoming = upcoming[:10]
+	}
+
+	writeJSON(w, http.StatusOK, workspaceContextResponse{
+		Projects:      projectItems,
+		Tasks:         taskItems,
+		UpcomingTasks: upcoming,
+		LoadedAt:      time.Now().UTC(),
+	})
 }
 
 func (h *HTTPHandler) GetProject(w http.ResponseWriter, r *http.Request) {

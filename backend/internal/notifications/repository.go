@@ -152,6 +152,25 @@ func (r *Repository) MarkAllRead(ctx context.Context, userID uuid.UUID) error {
 	return err
 }
 
+func (r *Repository) DeleteAll(ctx context.Context, userID uuid.UUID) (int, error) {
+	result, err := r.db.ExecContext(
+		ctx,
+		`DELETE FROM notifications
+		 WHERE user_id = $1`,
+		userID,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+
+	return int(affected), nil
+}
+
 func (r *Repository) UnreadCount(ctx context.Context, userID uuid.UUID) (int, error) {
 	var count int
 	err := r.db.QueryRowContext(

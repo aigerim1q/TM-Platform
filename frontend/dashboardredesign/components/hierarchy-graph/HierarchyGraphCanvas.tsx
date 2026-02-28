@@ -32,7 +32,7 @@ export function HierarchyGraphCanvas({ onUserNodePick }: HierarchyGraphCanvasPro
   const [rf, setRf] = useState<ReactFlowInstance<HierarchyGraphNode, HierarchyGraphEdge> | null>(null);
   const moveInFlightRef = useRef(false);
   const { resolvedTheme } = useTheme();
-  const isDark = resolvedTheme !== 'light';
+  const isDark = resolvedTheme === 'dark';
 
   const nodes = useHierarchyGraphStore((state) => state.nodes);
   const edges = useHierarchyGraphStore((state) => state.edges);

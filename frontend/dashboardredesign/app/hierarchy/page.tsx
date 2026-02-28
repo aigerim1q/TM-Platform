@@ -48,15 +48,15 @@ function HierarchyGraphScreen() {
   );
 
   return (
-    <div className="relative h-full w-full overflow-hidden bg-slate-950">
+    <div className="relative h-full w-full overflow-hidden bg-slate-50 dark:bg-slate-950">
       {pickerMode && (
-        <div className="absolute left-4 top-4 z-20 rounded-2xl border border-slate-600 bg-slate-900/95 px-4 py-3 text-sm text-slate-100 shadow-xl">
+        <div className="absolute left-4 top-4 z-20 rounded-2xl border border-slate-200 bg-white/95 px-4 py-3 text-sm text-slate-900 shadow-xl dark:border-slate-600 dark:bg-slate-900/95 dark:text-slate-100">
           <p className="font-semibold">Режим выбора ответственного</p>
-          <p className="mt-1 text-xs text-slate-300">Нажмите на узел сотрудника, чтобы назначить его на задачу.</p>
+          <p className="mt-1 text-xs text-slate-600 dark:text-slate-300">Нажмите на узел сотрудника, чтобы назначить его на задачу.</p>
           <button
             type="button"
             onClick={() => router.push(buildReturnUrl())}
-            className="mt-3 rounded-lg border border-slate-500 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:bg-slate-800"
+            className="mt-3 rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-900 hover:bg-slate-100 dark:border-slate-500 dark:text-slate-100 dark:hover:bg-slate-800"
           >
             Вернуться к задаче
           </button>
@@ -64,7 +64,7 @@ function HierarchyGraphScreen() {
       )}
 
       {loading ? (
-        <div className="flex h-full w-full items-center justify-center text-sm text-slate-300">
+        <div className="flex h-full w-full items-center justify-center text-sm text-slate-600 dark:text-slate-300">
           Загрузка иерархии...
         </div>
       ) : (
@@ -80,8 +80,8 @@ export default function HierarchyPage() {
     <GraphProvider>
       <Suspense
         fallback={
-          <div className="relative h-full w-full overflow-hidden bg-slate-950">
-            <div className="flex h-full w-full items-center justify-center text-sm text-slate-300">
+          <div className="relative h-full w-full overflow-hidden bg-slate-50 dark:bg-slate-950">
+            <div className="flex h-full w-full items-center justify-center text-sm text-slate-600 dark:text-slate-300">
               Загрузка иерархии...
             </div>
           </div>

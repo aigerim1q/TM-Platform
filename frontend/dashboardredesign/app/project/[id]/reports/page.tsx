@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter, useParams, useSearchParams } from 'next/navigation';
 import { ArrowLeft, MessageCircle, AlertCircle, Send, Paperclip, X, CornerDownRight } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Header from '@/components/header';
 import { api, getApiErrorMessage } from '@/lib/api';
 import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
@@ -564,7 +564,7 @@ export default function ReportsPage() {
     }
   };
 
-  const renderCommentsTree = (reportId: string, parentId: string | null = null, level = 0): JSX.Element[] => {
+  const renderCommentsTree = (reportId: string, parentId: string | null = null, level = 0): ReactNode[] => {
     const all = commentsByReportId[reportId] || [];
     const items = all.filter((item) => String(item.parent_id || item.parentId || '') === String(parentId || ''));
 

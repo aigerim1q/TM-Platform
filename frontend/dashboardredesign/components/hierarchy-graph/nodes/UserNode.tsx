@@ -40,7 +40,6 @@ export function UserNode({ id, type, data, selected }: NodeProps<HierarchyGraphN
         <div className="flex items-center gap-3">
           <div className="grid h-10 w-10 place-items-center overflow-hidden rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/50 dark:text-emerald-300">
             {avatar ? (
-              // eslint-disable-next-line @next/next/no-img-element
               <img src={avatar} alt={data.title} className="h-full w-full object-cover" />
             ) : (
               <User2 size={18} />

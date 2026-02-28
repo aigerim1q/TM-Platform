@@ -4,8 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-
-	"github.com/golang-jwt/jwt/v5"
 )
 
 type contextKey string
@@ -22,25 +20,18 @@ func JwtMiddleware(svc *Service) func(http.Handler) http.Handler {
 				return
 			}
 
-			token, err := svc.ParseToken(parts[1])
-			if err != nil || !token.Valid {
+			claims, err := svc.ParseToken(parts[1], TokenTypeAccess)
+			if err != nil {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 				return
 			}
 
-			claims, ok := token.Claims.(jwt.MapClaims)
-			if !ok {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token claims"})
-				return
-			}
-
-			userID, ok := claims["sub"].(string)
-			if !ok || userID == "" {
+			if claims.Subject == "" {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token subject"})
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), userIDKey, userID)
+			ctx := context.WithValue(r.Context(), userIDKey, claims.Subject)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}

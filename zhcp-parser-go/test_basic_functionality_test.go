@@ -4,12 +4,34 @@ import (
 	"os"
 	"testing"
 
+	"zhcp-parser-go/internal/ai"
+	"zhcp-parser-go/internal/ai/llm_providers/anthropic"
+	"zhcp-parser-go/internal/ai/llm_providers/deepseek"
+	"zhcp-parser-go/internal/ai/llm_providers/ollama"
+	"zhcp-parser-go/internal/ai/llm_providers/openai"
+	"zhcp-parser-go/internal/common"
 	"zhcp-parser-go/internal/config"
 	"zhcp-parser-go/internal/parser"
 )
 
+func registerTestProviders() {
+	ai.RegisterProvider("openai", func(config common.ProviderConfig) (ai.LLMProvider, error) {
+		return openai.NewOpenAIProvider(config.APIKey, config.Model)
+	})
+	ai.RegisterProvider("anthropic", func(config common.ProviderConfig) (ai.LLMProvider, error) {
+		return anthropic.NewAnthropicProvider(config.APIKey, config.Model)
+	})
+	ai.RegisterProvider("ollama", func(config common.ProviderConfig) (ai.LLMProvider, error) {
+		return ollama.NewOllamaProvider(config.Model, config.BaseURL)
+	})
+	ai.RegisterProvider("deepseek", func(config common.ProviderConfig) (ai.LLMProvider, error) {
+		return deepseek.NewDeepSeekProvider(config.APIKey, config.Model)
+	})
+}
+
 // TestBasicFunctionality tests the basic functionality of the parser
 func TestBasicFunctionality(t *testing.T) {
+	registerTestProviders()
 	// Create a temporary config file for testing
 	tempConfigPath := "test_config.yaml"
 

@@ -7,6 +7,16 @@ import { useRouter } from 'next/navigation';
 import { api, getApiErrorMessage } from '@/lib/api';
 import { getDisplayNameFromEmail } from '@/lib/utils';
 import { emitNotificationsUpdated, NOTIFICATIONS_UPDATED_EVENT } from '@/lib/notifications-events';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 type NotificationKind = 'project_created' | 'task_delegated' | 'task_assigned' | 'project_member' | 'task_comment' | 'call_invite';
 
@@ -68,9 +78,12 @@ export default function NotificationsContentLive() {
   const [activeTab, setActiveTab] = useState<'all' | 'unread'>('all');
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const unreadCount = useMemo(() => items.filter((x) => !x.readAt).length, [items]);
+  const canClear = items.length > 0 && !isLoading && !isClearing;
 
   const loadItems = async (tab: 'all' | 'unread', silent = false) => {
     if (!silent) {
@@ -148,6 +161,26 @@ export default function NotificationsContentLive() {
     }
   };
 
+  const clearAllNotifications = async () => {
+    if (!canClear) {
+      return;
+    }
+
+    setIsClearing(true);
+    setError(null);
+
+    try {
+      await api.delete('/notifications');
+      setItems([]);
+      setIsClearConfirmOpen(false);
+      emitNotificationsUpdated();
+    } catch (e) {
+      setError(getApiErrorMessage(e, 'Не удалось очистить уведомления'));
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
   return (
     <div className="mx-auto max-w-5xl px-6 py-8 pb-20">
       <div className="mb-8 flex items-center justify-between gap-4">
@@ -159,13 +192,25 @@ export default function NotificationsContentLive() {
           <p className="mt-2 text-gray-500 dark:text-gray-400">События по проектам, делегированию и комментариям</p>
         </div>
 
-        <button
-          type="button"
-          onClick={() => void markAllRead()}
-          className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
-        >
-          Пометить все прочитанным
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              setIsClearConfirmOpen(true);
+            }}
+            disabled={!canClear}
+            className="rounded-full border border-rose-300 px-4 py-2 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-rose-900 dark:text-rose-300 dark:hover:bg-rose-950/30"
+          >
+            Очистить уведомления
+          </button>
+          <button
+            type="button"
+            onClick={() => void markAllRead()}
+            className="rounded-full border border-gray-300 px-4 py-2 text-sm font-semibold text-gray-700 hover:bg-gray-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+          >
+            Пометить все прочитанным
+          </button>
+        </div>
       </div>
 
       <div className="mb-6 flex items-center gap-3 border-b border-gray-200 pb-3 dark:border-gray-700">
@@ -255,6 +300,37 @@ export default function NotificationsContentLive() {
           })}
         </div>
       )}
+
+      <AlertDialog
+        open={isClearConfirmOpen}
+        onOpenChange={(open) => {
+          if (isClearing) {
+            return;
+          }
+          setIsClearConfirmOpen(open);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Очистить уведомления?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Все уведомления будут удалены без возможности восстановления.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearing}>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 hover:bg-rose-700 focus-visible:ring-rose-500"
+              onClick={() => {
+                void clearAllNotifications();
+              }}
+              disabled={isClearing}
+            >
+              {isClearing ? 'Очистка...' : 'Очистить'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

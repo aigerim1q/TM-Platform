@@ -22,7 +22,6 @@ export function CompanyNode({ id, type, data, selected }: NodeProps<HierarchyGra
         <div className="flex items-center gap-3">
           <div className="grid h-10 w-10 place-items-center overflow-hidden rounded-xl bg-indigo-500/15 text-indigo-600 dark:text-indigo-300">
             {avatar ? (
-              // eslint-disable-next-line @next/next/no-img-element
               <img src={avatar} alt={data.title} className="h-full w-full object-cover" />
             ) : (
               <Building2 size={18} />

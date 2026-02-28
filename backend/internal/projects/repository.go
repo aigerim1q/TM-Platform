@@ -560,6 +560,33 @@ func (r *Repository) ListStagesByProject(ctx context.Context, ownerID, projectID
 	return stages, rows.Err()
 }
 
+func (r *Repository) ListStagesByUser(ctx context.Context, userID uuid.UUID) ([]Stage, error) {
+	rows, err := r.db.QueryContext(
+		ctx,
+		`SELECT DISTINCT s.id, s.project_id, s.title, s.order_index
+		 FROM project_stages s
+		 JOIN project_members pm ON pm.project_id = s.project_id
+		 WHERE pm.user_id = $1
+		 ORDER BY s.project_id, s.order_index ASC, s.id ASC`,
+		userID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stages := make([]Stage, 0)
+	for rows.Next() {
+		var stage Stage
+		if err := rows.Scan(&stage.ID, &stage.ProjectID, &stage.Title, &stage.OrderIndex); err != nil {
+			return nil, err
+		}
+		stages = append(stages, stage)
+	}
+
+	return stages, rows.Err()
+}
+
 func (r *Repository) UpdateStage(ctx context.Context, ownerID, stageID uuid.UUID, title string, orderIndex int) (Stage, error) {
 	row := r.db.QueryRowContext(
 		ctx,
@@ -706,6 +733,34 @@ func (r *Repository) ListTasksByStage(ctx context.Context, ownerID, stageID uuid
 		 ORDER BY t.order_index ASC, t.created_at ASC`,
 		stageID,
 		ownerID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	tasks := make([]Task, 0)
+	for rows.Next() {
+		task, scanErr := scanTask(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		tasks = append(tasks, task)
+	}
+
+	return tasks, rows.Err()
+}
+
+func (r *Repository) ListTasksByUser(ctx context.Context, userID uuid.UUID) ([]Task, error) {
+	rows, err := r.db.QueryContext(
+		ctx,
+		`SELECT DISTINCT t.id, t.stage_id, s.project_id, t.title, t.status, t.start_date, t.deadline, t.order_index, t.blocks, t.updated_at
+		 FROM stage_tasks t
+		 JOIN project_stages s ON s.id = t.stage_id
+		 JOIN project_members pm ON pm.project_id = s.project_id
+		 WHERE pm.user_id = $1
+		 ORDER BY s.project_id, t.stage_id, t.order_index ASC, t.id ASC`,
+		userID,
 	)
 	if err != nil {
 		return nil, err

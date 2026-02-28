@@ -19,7 +19,7 @@ type RegisterPayload = {
 
 type AuthResponse = {
   accessToken: string;
-  refreshToken: string;
+  refreshToken?: string;
 };
 
 type UserResponse = {
@@ -39,7 +39,7 @@ export async function login(payload: LoginPayload) {
       password: payload.password,
     });
 
-    if (data.accessToken && data.refreshToken) {
+    if (data.accessToken) {
       setTokens({ accessToken: data.accessToken, refreshToken: data.refreshToken });
     }
 

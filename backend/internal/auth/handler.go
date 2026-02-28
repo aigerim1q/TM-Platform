@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,19 +15,23 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
 	"golang.org/x/crypto/bcrypt"
 )
 
+const refreshCookieName = "refresh_token"
+const refreshTokenTTL = 7 * 24 * time.Hour
+const accessTokenTTL = 15 * time.Minute
+
 type Handler struct {
-	repo *Repository
-	svc  *Service
+	repo   *Repository
+	svc    *Service
+	appEnv string
 }
 
-func NewHandler(repo *Repository, svc *Service) *Handler {
-	return &Handler{repo: repo, svc: svc}
+func NewHandler(repo *Repository, svc *Service, appEnv string) *Handler {
+	return &Handler{repo: repo, svc: svc, appEnv: strings.ToLower(strings.TrimSpace(appEnv))}
 }
 
 type authRequest struct {
@@ -111,19 +117,11 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		log.Printf("register: unexpected content-type: %s", contentType)
 	}
 
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "failed to read body"})
-		return
-	}
-	log.Printf("register: raw body: %s", string(bodyBytes))
-
 	var req registerRequest
-	if err := json.Unmarshal(bodyBytes, &req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	log.Printf("register: decoded payload: %+v", req)
 
 	req.Email = strings.TrimSpace(req.Email)
 	if req.Email == "" || req.Password == "" {
@@ -200,56 +198,92 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, err := h.svc.CreateToken(user.ID.String(), 15*time.Minute)
+	accessToken, _, err := h.svc.CreateToken(user.ID.String(), TokenTypeAccess, accessTokenTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create token"})
 		return
 	}
-	refreshToken, err := h.svc.CreateToken(user.ID.String(), 7*24*time.Hour)
+	refreshToken, refreshJTI, err := h.svc.CreateToken(user.ID.String(), TokenTypeRefresh, refreshTokenTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create token"})
 		return
 	}
+	refreshHash := hashToken(refreshToken)
+	if err := h.repo.StoreRefreshToken(r.Context(), user.ID, refreshJTI, refreshHash, time.Now().UTC().Add(refreshTokenTTL)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to persist refresh token"})
+		return
+	}
+
+	h.setRefreshCookie(w, r, refreshToken)
 
 	writeJSON(w, http.StatusOK, authResponse{AccessToken: accessToken, RefreshToken: refreshToken})
 }
 
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	var req refreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	if strings.TrimSpace(req.RefreshToken) == "" {
+	refreshToken := strings.TrimSpace(req.RefreshToken)
+	if refreshToken == "" {
+		if cookie, err := r.Cookie(refreshCookieName); err == nil {
+			refreshToken = strings.TrimSpace(cookie.Value)
+		}
+	}
+	if refreshToken == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "refresh token is required"})
 		return
 	}
 
-	token, err := h.svc.ParseToken(req.RefreshToken)
-	if err != nil || !token.Valid {
+	claims, err := h.svc.ParseToken(refreshToken, TokenTypeRefresh)
+	if err != nil {
+		h.clearRefreshCookie(w, r)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
 		return
 	}
 
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token claims"})
-		return
-	}
-
-	userID, ok := claims["sub"].(string)
-	if !ok || userID == "" {
+	userID := strings.TrimSpace(claims.Subject)
+	if userID == "" {
+		h.clearRefreshCookie(w, r)
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token subject"})
 		return
 	}
 
-	accessToken, err := h.svc.CreateToken(userID, 15*time.Minute)
+	accessToken, _, err := h.svc.CreateToken(userID, TokenTypeAccess, accessTokenTTL)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create token"})
+		return
+	}
+	newRefreshToken, newRefreshJTI, err := h.svc.CreateToken(userID, TokenTypeRefresh, refreshTokenTTL)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create token"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, authResponse{AccessToken: accessToken, RefreshToken: req.RefreshToken})
+	oldHash := hashToken(refreshToken)
+	newHash := hashToken(newRefreshToken)
+	_, err = h.repo.ConsumeAndRotateRefreshToken(
+		r.Context(),
+		oldHash,
+		claims.ID,
+		newRefreshJTI,
+		newHash,
+		time.Now().UTC().Add(refreshTokenTTL),
+	)
+	if err != nil {
+		h.clearRefreshCookie(w, r)
+		if errors.Is(err, ErrRefreshTokenNotFound) || errors.Is(err, ErrRefreshTokenInvalid) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid refresh token"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to refresh token"})
+		return
+	}
+
+	h.setRefreshCookie(w, r, newRefreshToken)
+
+	writeJSON(w, http.StatusOK, authResponse{AccessToken: accessToken, RefreshToken: newRefreshToken})
 }
 
 func (h *Handler) GetUserProfile(w http.ResponseWriter, r *http.Request) {
@@ -476,12 +510,7 @@ func (h *Handler) CreateDepartment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, departmentResponse{
-		ID:        department.ID,
-		Name:      department.Name,
-		ParentID:  department.ParentID,
-		CreatedAt: department.CreatedAt,
-	})
+	writeJSON(w, http.StatusCreated, departmentResponse(department))
 }
 
 func (h *Handler) ListDepartments(w http.ResponseWriter, r *http.Request) {
@@ -493,12 +522,7 @@ func (h *Handler) ListDepartments(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]departmentResponse, 0, len(departments))
 	for _, department := range departments {
-		resp = append(resp, departmentResponse{
-			ID:        department.ID,
-			Name:      department.Name,
-			ParentID:  department.ParentID,
-			CreatedAt: department.CreatedAt,
-		})
+		resp = append(resp, departmentResponse(department))
 	}
 
 	writeJSON(w, http.StatusOK, resp)
@@ -925,4 +949,42 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(payload)
+}
+
+func hashToken(raw string) string {
+	digest := sha256.Sum256([]byte(raw))
+	return hex.EncodeToString(digest[:])
+}
+
+func (h *Handler) setRefreshCookie(w http.ResponseWriter, r *http.Request, refreshToken string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     refreshCookieName,
+		Value:    refreshToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   h.shouldUseSecureCookies(r),
+		MaxAge:   int(refreshTokenTTL.Seconds()),
+		Expires:  time.Now().Add(refreshTokenTTL),
+	})
+}
+
+func (h *Handler) clearRefreshCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     refreshCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   h.shouldUseSecureCookies(r),
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0),
+	})
+}
+
+func (h *Handler) shouldUseSecureCookies(r *http.Request) bool {
+	if strings.EqualFold(h.appEnv, "production") {
+		return true
+	}
+	return r.TLS != nil
 }

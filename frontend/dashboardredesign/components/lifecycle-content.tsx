@@ -67,7 +67,7 @@ function loadStoredDocs(userId: string): LifecycleDocument[] {
 
     return parsed
       .filter((item) => item && typeof item === 'object')
-      .map((item) => ({
+      .map((item): LifecycleDocument => ({
         id: String(item.id || ''),
         fileName: String(item.fileName || 'Документ'),
         uploadedAt: String(item.uploadedAt || new Date().toISOString()),

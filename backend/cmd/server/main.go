@@ -1,8 +1,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"tm-platform-backend/internal/aichat"
 	"tm-platform-backend/internal/auth"
@@ -20,6 +26,9 @@ import (
 
 func main() {
 	cfg := config.Load()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 
 	dbConn, err := db.Open(cfg.DatabaseDSN())
 	if err != nil {
@@ -29,7 +38,7 @@ func main() {
 
 	authRepo := auth.NewRepository(dbConn)
 	authSvc := auth.NewService(cfg.JWTSecret)
-	authHandler := auth.NewHandler(authRepo, authSvc)
+	authHandler := auth.NewHandler(authRepo, authSvc, cfg.AppEnv)
 	hierarchyRepo := hierarchy.NewRepository(dbConn)
 	hierarchyHandler := hierarchy.NewHandler(hierarchyRepo, authRepo)
 	notificationsRepo := notifications.NewRepository(dbConn)
@@ -52,18 +61,60 @@ func main() {
 	chatsRepo := chats.NewRepository(dbConn)
 	chatsHandler := chats.NewHandler(chatsRepo, notificationsRepo)
 
-	router := httpapi.NewRouter(authHandler, hierarchyHandler, projectsHandler, uploadHandler, projectFilesHandler, zhcpHandler, aiChatHandler, notificationsHandler, chatsHandler, authSvc)
+	readyCheck := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return dbConn.PingContext(ctx)
+	}
+	router := httpapi.NewRouter(
+		authHandler,
+		hierarchyHandler,
+		projectsHandler,
+		uploadHandler,
+		projectFilesHandler,
+		zhcpHandler,
+		aiChatHandler,
+		notificationsHandler,
+		chatsHandler,
+		authSvc,
+		cfg.CORSOrigins,
+		readyCheck,
+	)
 	mux := http.NewServeMux()
 	mux.Handle("/uploads/", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./uploads"))))
 	mux.Handle("/", router)
 
 	server := &http.Server{
-		Addr:    cfg.ServerAddr,
-		Handler: mux,
+		Addr:              cfg.ServerAddr,
+		Handler:           mux,
+		ReadTimeout:       cfg.ReadTimeout,
+		ReadHeaderTimeout: cfg.ReadHdrTO,
+		WriteTimeout:      cfg.WriteTimeout,
+		IdleTimeout:       cfg.IdleTimeout,
 	}
 
-	log.Printf("server started on %s", cfg.ServerAddr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("server started on %s", cfg.ServerAddr)
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case sig := <-sigCh:
+		log.Printf("shutdown signal received: %s", sig.String())
+	case err := <-errCh:
 		log.Fatalf("server failed: %v", err)
 	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("graceful shutdown failed: %v", err)
+	}
+	log.Printf("server stopped")
 }

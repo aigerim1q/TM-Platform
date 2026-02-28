@@ -3,9 +3,20 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import Link from 'next/link';
-import { Send, FileText, Phone, Video, MoreVertical, Sparkles, SquarePen, AlertTriangle, User, Plus, ArrowUp, ShieldCheck, ChevronRight } from 'lucide-react';
+import { Send, FileText, Phone, Video, MoreVertical, Sparkles, SquarePen, AlertTriangle, User, Plus, ArrowUp, ShieldCheck, ChevronRight, Trash2 } from 'lucide-react';
 import { api, getApiErrorMessage } from '@/lib/api';
+import { clearAiChatHistory } from '@/lib/ai-chat';
 import { AI_CONTEXT_UPDATED_EVENT, type AIProjectContext, loadAIProjectContext, saveAIProjectContext } from '@/lib/ai-context';
+import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 interface ProjectInfo {
     name: string;
@@ -70,6 +81,13 @@ type WorkspaceContext = {
     loadedAt: number;
 };
 
+type WorkspaceContextAPIResponse = {
+    projects?: WorkspaceProject[];
+    tasks?: UserTask[];
+    upcomingTasks?: UserTask[];
+    loaded_at?: string;
+};
+
 function resolveProjectCardHref(href?: string) {
     const fallback = '/projects/new';
     if (!href) return fallback;
@@ -84,12 +102,21 @@ function resolveProjectCardHref(href?: string) {
     return raw;
 }
 
+function isClearChatCommand(value: string) {
+    const normalized = value.trim().toLowerCase();
+    return normalized === '/clear' || normalized === 'очистить чат';
+}
+
 export default function AIChatContent() {
     const searchParams = useSearchParams();
     const mode = searchParams.get('mode');
     const chatMode: 'template' | 'ordinary' = mode === 'ordinary' ? 'ordinary' : 'template';
 
     const [messages, setMessages] = useState<Message[]>([]);
+    const [isMessagesLoading, setIsMessagesLoading] = useState(true);
+    const [isClearing, setIsClearing] = useState(false);
+    const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
+    const [clearError, setClearError] = useState<string | null>(null);
     const [input, setInput] = useState('');
     const [activeContext, setActiveContext] = useState<AIProjectContext | null>(null);
     const [isContextReady, setIsContextReady] = useState(false);
@@ -111,6 +138,14 @@ export default function AIChatContent() {
         }
         return `template:${hash.toString(16)}`;
     }, [activeContext, chatMode]);
+
+    const createGreetingMessage = useCallback((): Message => ({
+        id: `greeting-${Date.now()}`,
+        text: buildGreeting(activeContext),
+        sender: 'other',
+        timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
+        senderName: 'AI-Ассистент',
+    }), [activeContext]);
 
     useEffect(() => {
         setActiveContext(loadAIProjectContext());
@@ -141,58 +176,19 @@ export default function AIChatContent() {
 
         (async () => {
             try {
-                const { data: projectsData } = await api.get<UserProject[]>('/projects/');
-                const projects = Array.isArray(projectsData) ? projectsData : [];
-
-                const projectsWithDetails = await Promise.all(
-                    projects.map(async (project) => {
-                        try {
-                            const { data: stagesData } = await api.get<UserStage[]>(`/projects/${project.id}/stages`);
-                            const stages = Array.isArray(stagesData) ? stagesData : [];
-
-                            const tasksPerStage = await Promise.all(
-                                stages.map(async (stage) => {
-                                    try {
-                                        const { data: tasksData } = await api.get<UserTask[]>(`/stages/${stage.id}/tasks`);
-                                        const tasks = Array.isArray(tasksData) ? tasksData : [];
-                                        return tasks.map((task) => ({
-                                            ...task,
-                                            projectTitle: project.title,
-                                            stageTitle: stage.title || 'Без этапа',
-                                        }));
-                                    } catch {
-                                        return [] as UserTask[];
-                                    }
-                                })
-                            );
-
-                            return {
-                                ...project,
-                                stages,
-                                tasks: tasksPerStage.flat(),
-                            } as WorkspaceProject;
-                        } catch {
-                            return {
-                                ...project,
-                                stages: [],
-                                tasks: [],
-                            } as WorkspaceProject;
-                        }
-                    })
-                );
-
-                const allTasks = projectsWithDetails.flatMap((project) => project.tasks);
-                const upcomingTasks = [...allTasks]
-                    .filter((task) => task.deadline && !Number.isNaN(new Date(task.deadline).getTime()))
-                    .sort((a, b) => new Date(a.deadline as string).getTime() - new Date(b.deadline as string).getTime())
-                    .slice(0, 10);
-
+                const { data } = await api.get<WorkspaceContextAPIResponse>('/workspace/context');
                 if (!isMounted) return;
+
+                const projects = Array.isArray(data?.projects) ? data.projects : [];
+                const tasks = Array.isArray(data?.tasks) ? data.tasks : [];
+                const upcomingTasks = Array.isArray(data?.upcomingTasks) ? data.upcomingTasks : [];
+                const loadedAt = data?.loaded_at ? Date.parse(data.loaded_at) : Date.now();
+
                 setWorkspaceContext({
-                    projects: projectsWithDetails,
-                    tasks: allTasks,
+                    projects,
+                    tasks,
                     upcomingTasks,
-                    loadedAt: Date.now(),
+                    loadedAt: Number.isNaN(loadedAt) ? Date.now() : loadedAt,
                 });
             } catch {
                 if (!isMounted) return;
@@ -207,6 +203,7 @@ export default function AIChatContent() {
 
     useEffect(() => {
         let isMounted = true;
+        setIsMessagesLoading(true);
 
         (async () => {
             try {
@@ -227,6 +224,7 @@ export default function AIChatContent() {
                             projectInfo: item.projectInfo,
                         }))
                     );
+                    setIsMessagesLoading(false);
                     return;
                 }
             } catch {
@@ -235,21 +233,14 @@ export default function AIChatContent() {
 
             if (!isMounted) return;
 
-            setMessages([
-                {
-                    id: 0,
-                    text: buildGreeting(activeContext),
-                    sender: 'other',
-                    timestamp: new Date().toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }),
-                    senderName: 'AI-Ассистент',
-                },
-            ]);
+            setMessages([createGreetingMessage()]);
+            setIsMessagesLoading(false);
         })();
 
         return () => {
             isMounted = false;
         };
-    }, [activeContext, resolvedMode]);
+    }, [createGreetingMessage, resolvedMode]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     const scrollToBottom = () => {
@@ -273,9 +264,37 @@ export default function AIChatContent() {
         }
     };
 
+    const clearCurrentChat = useCallback(async () => {
+        if (isClearing) {
+            return false;
+        }
+
+        setIsClearing(true);
+        setClearError(null);
+        try {
+            await clearAiChatHistory(resolvedMode);
+            setMessages([createGreetingMessage()]);
+            setIsClearConfirmOpen(false);
+            return true;
+        } catch (error) {
+            setClearError(getApiErrorMessage(error, 'Не удалось очистить чат'));
+            return false;
+        } finally {
+            setIsClearing(false);
+        }
+    }, [createGreetingMessage, isClearing, resolvedMode]);
+
+    const requestClearChat = useCallback(() => {
+        if (isClearing) {
+            return;
+        }
+        setIsClearConfirmOpen(true);
+    }, [isClearing]);
+
     const sendPrompt = useCallback((rawPrompt: string) => {
         const prompt = rawPrompt.trim();
         if (!prompt) return;
+        setClearError(null);
 
         const userMessage: Message = {
             id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -451,9 +470,19 @@ export default function AIChatContent() {
         }, 500);
     }, [activeContext, resolvedMode, workspaceContext]);
 
-    const handleSendMessage = (e?: React.FormEvent) => {
+    const handleSendMessage = async (e?: React.FormEvent) => {
         if (e) e.preventDefault();
-        sendPrompt(input);
+
+        const prompt = input.trim();
+        if (!prompt) return;
+
+        if (isClearChatCommand(prompt)) {
+            setInput('');
+            requestClearChat();
+            return;
+        }
+
+        sendPrompt(prompt);
         setInput('');
     };
 
@@ -504,7 +533,13 @@ export default function AIChatContent() {
 
             {/* Messages Area / Welcome Screen */}
             <div className="flex-1 overflow-y-auto px-6 pt-10">
-                {messages.length === 0 ? (
+                {isMessagesLoading ? (
+                    <div className="max-w-4xl mx-auto flex h-full items-center justify-center py-10">
+                        <p className="text-sm text-gray-500 dark:text-gray-400 transition-colors">
+                            Загрузка чата...
+                        </p>
+                    </div>
+                ) : messages.length === 0 ? (
                     <div className="max-w-4xl mx-auto flex flex-col items-center justify-center h-full text-center py-10">
                         {/* Central Icon */}
                         <div className="w-16 h-16 bg-linear-to-br from-[#A855F7] to-[#7C3AED] rounded-2xl flex items-center justify-center shadow-[0_8px_20px_rgba(139,92,246,0.3)] mb-8">
@@ -512,7 +547,7 @@ export default function AIChatContent() {
                         </div>
 
                         <h1 className="text-4xl font-bold text-[#111827] dark:text-white mb-4 transition-colors">
-                            Чем я могу помочь вам сегодня?
+                            Начните диалог с AI
                         </h1>
                         <p className="text-lg text-gray-500 dark:text-gray-400 mb-12 transition-colors">
                             Задайте вопрос или выберите одно из предложений ниже
@@ -592,11 +627,25 @@ export default function AIChatContent() {
             <div className="px-6 pb-8 pt-4">
                 <div className="max-w-4xl mx-auto relative">
                     <form
-                        onSubmit={handleSendMessage}
+                        onSubmit={(e) => {
+                            void handleSendMessage(e);
+                        }}
                         className="relative flex items-center bg-white dark:bg-card rounded-3xl border border-[#E5E7EB] dark:border-white/10 shadow-[0_2px_15px_rgba(0,0,0,0.02)] ring-1 ring-purple-100/50 dark:ring-white/5 p-2 pl-4 transition-all focus-within:ring-purple-200 dark:focus-within:ring-white/20 focus-within:shadow-lg"
                     >
                         <button type="button" className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors">
                             <Plus size={20} />
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => {
+                                requestClearChat();
+                            }}
+                            title="Очистить чат"
+                            aria-label="Очистить чат"
+                            disabled={isClearing}
+                            className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <Trash2 size={18} />
                         </button>
 
                         <input
@@ -609,12 +658,17 @@ export default function AIChatContent() {
 
                         <button
                             type="submit"
-                            disabled={!input.trim()}
+                            disabled={!input.trim() || isClearing}
                             className="w-10 h-10 bg-[#4B4B4B] hover:bg-black dark:bg-white dark:text-black dark:hover:bg-gray-200 disabled:bg-gray-200 dark:disabled:bg-gray-700 disabled:text-gray-400 dark:disabled:text-gray-500 text-white rounded-full flex items-center justify-center transition-all shadow-sm shrink-0"
                         >
                             <ArrowUp className="w-5 h-5" />
                         </button>
                     </form>
+                    {clearError && (
+                        <p className="mt-2 px-2 text-xs text-red-500 dark:text-red-400">
+                            {clearError}
+                        </p>
+                    )}
 
                     {/* Footer Info */}
                     <div className="flex justify-between items-center mt-4 px-2 text-[11px] font-medium tracking-tight">
@@ -630,6 +684,37 @@ export default function AIChatContent() {
                     </div>
                 </div>
             </div>
+
+            <AlertDialog
+                open={isClearConfirmOpen}
+                onOpenChange={(open) => {
+                    if (isClearing) {
+                        return;
+                    }
+                    setIsClearConfirmOpen(open);
+                }}
+            >
+                <AlertDialogContent>
+                    <AlertDialogHeader>
+                        <AlertDialogTitle>Очистить чат?</AlertDialogTitle>
+                        <AlertDialogDescription>
+                            Будет удалена история только текущего режима чата.
+                        </AlertDialogDescription>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                        <AlertDialogCancel disabled={isClearing}>Отмена</AlertDialogCancel>
+                        <AlertDialogAction
+                            className="bg-rose-600 hover:bg-rose-700 focus-visible:ring-rose-500"
+                            onClick={() => {
+                                void clearCurrentChat();
+                            }}
+                            disabled={isClearing}
+                        >
+                            {isClearing ? 'Очистка...' : 'Очистить'}
+                        </AlertDialogAction>
+                    </AlertDialogFooter>
+                </AlertDialogContent>
+            </AlertDialog>
         </div>
     );
 }

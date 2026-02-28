@@ -6,7 +6,7 @@ import { useState, useEffect } from 'react';
 import ChatsDropdown from './chats-dropdown';
 import ThemeToggleAnimated from './theme-toggle-animated';
 import { api } from '@/lib/api';
-import { getAccessToken, getCurrentUserId } from '@/lib/api';
+import { getCurrentUserId } from '@/lib/api';
 import { getChatUnreadCount, touchChatPresence } from '@/lib/chats';
 import { NOTIFICATIONS_UPDATED_EVENT } from '@/lib/notifications-events';
 import { getDisplayNameFromEmail, getFileUrl } from '@/lib/utils';
@@ -74,11 +74,6 @@ export default function Header() {
     let disposed = false;
 
     const loadChatUnreadCount = async () => {
-      if (!getAccessToken()) {
-        if (!disposed) setChatUnreadCount(0);
-        return;
-      }
-
       try {
         const count = await getChatUnreadCount();
         if (!disposed) {
@@ -114,8 +109,6 @@ export default function Header() {
   }, [pathname]);
 
   useEffect(() => {
-    if (!getAccessToken()) return;
-
     const ping = () => {
       touchChatPresence().catch(() => {
         // ignore transient network/auth failures

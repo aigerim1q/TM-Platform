@@ -77,7 +77,14 @@ export default function ProjectPreview() {
     },
   };
 
-  const project = projectData[params.id] || projectData.shyraq;
+  type ProjectDataKey = keyof typeof projectData;
+  const rawProjectId = params?.id;
+  const projectId = Array.isArray(rawProjectId) ? rawProjectId[0] : rawProjectId;
+  const selectedProjectKey: ProjectDataKey =
+    projectId && Object.prototype.hasOwnProperty.call(projectData, projectId)
+      ? (projectId as ProjectDataKey)
+      : 'shyraq';
+  const project = projectData[selectedProjectKey];
 
   return (
     <div className="min-h-screen bg-white dark:bg-background">
@@ -179,7 +186,7 @@ export default function ProjectPreview() {
                 Подтвердить и продолжить ✓
               </button>
               <button
-                onClick={() => router.push(`/project/${params.id}/edit`)}
+                onClick={() => router.push(`/project/${selectedProjectKey}/edit`)}
                 className="flex-1 border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-800 text-gray-900 dark:text-white font-semibold py-3 rounded-2xl transition-colors"
               >
                 Редактировать

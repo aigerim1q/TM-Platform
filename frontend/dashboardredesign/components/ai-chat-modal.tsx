@@ -1,9 +1,20 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { X, ArrowUp, Sparkles } from 'lucide-react';
-import { api } from '@/lib/api';
+import { X, ArrowUp, Sparkles, Trash2 } from 'lucide-react';
+import { api, getApiErrorMessage } from '@/lib/api';
+import { clearAiChatHistory } from '@/lib/ai-chat';
 import { AI_CONTEXT_UPDATED_EVENT, type AIProjectContext, loadAIProjectContext } from '@/lib/ai-context';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 
 type PersistedMessage = {
   id: string;
@@ -49,6 +60,11 @@ type Props = {
   open: boolean;
   onClose: () => void;
 };
+
+function isClearChatCommand(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === '/clear' || normalized === 'очистить чат';
+}
 
 function formatTime(dateLike: string | number | Date) {
   const d = new Date(dateLike);
@@ -229,6 +245,9 @@ export default function AIChatModal({ open, onClose }: Props) {
   const [ctx, setCtx] = useState<WorkspaceContext | null>(null);
   const [activeContext, setActiveContext] = useState<AIProjectContext | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [isClearConfirmOpen, setIsClearConfirmOpen] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
 
   const resolvedMode = useMemo(() => {
@@ -351,9 +370,45 @@ export default function AIChatModal({ open, onClose }: Props) {
     }
   };
 
+  const clearCurrentChat = async () => {
+    if (isClearing || loading) {
+      return false;
+    }
+
+    setIsClearing(true);
+    setClearError(null);
+
+    try {
+      await clearAiChatHistory(resolvedMode);
+      setMessages([initialGreeting]);
+      setIsClearConfirmOpen(false);
+      return true;
+    } catch (error) {
+      setClearError(getApiErrorMessage(error, 'Не удалось очистить чат'));
+      return false;
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
+  const requestClearChat = () => {
+    if (isClearing || loading) {
+      return;
+    }
+    setIsClearConfirmOpen(true);
+  };
+
   const sendMessage = async () => {
     const prompt = input.trim();
-    if (!prompt || loading) return;
+    if (!prompt || loading || isClearing) return;
+
+    if (isClearChatCommand(prompt)) {
+      setInput('');
+      requestClearChat();
+      return;
+    }
+
+    setClearError(null);
 
     const userMessage: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -395,9 +450,23 @@ export default function AIChatModal({ open, onClose }: Props) {
             <Sparkles size={16} />
             <span className="text-sm font-semibold">AI чат-помощник</span>
           </div>
-          <button type="button" onClick={onClose} className="p-1.5 rounded-full hover:bg-white/15">
-            <X size={16} />
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                requestClearChat();
+              }}
+              title="Очистить чат"
+              aria-label="Очистить чат"
+              disabled={isClearing || loading}
+              className="p-1.5 rounded-full hover:bg-white/15 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Trash2 size={16} />
+            </button>
+            <button type="button" onClick={onClose} className="p-1.5 rounded-full hover:bg-white/15">
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
         <div className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-[#04284d]">
@@ -438,18 +507,55 @@ export default function AIChatModal({ open, onClose }: Props) {
               value={input}
               onChange={(e) => setInput(e.target.value)}
               placeholder="Спросите про проекты и дедлайны..."
+              disabled={isClearing}
               className="flex-1 h-10 rounded-xl border border-white/15 bg-[#13385e] px-3 text-sm outline-none focus:ring-2 focus:ring-sky-300 text-white placeholder:text-white/60"
             />
             <button
               type="submit"
-              disabled={!input.trim() || loading}
+              disabled={!input.trim() || loading || isClearing}
               className="h-10 w-10 rounded-xl bg-[#2d9cfa] text-white flex items-center justify-center disabled:opacity-50"
             >
               <ArrowUp size={16} />
             </button>
           </form>
+          {clearError && (
+            <p className="mt-2 text-xs text-red-300">
+              {clearError}
+            </p>
+          )}
         </div>
       </div>
+
+      <AlertDialog
+        open={isClearConfirmOpen}
+        onOpenChange={(open) => {
+          if (isClearing) {
+            return;
+          }
+          setIsClearConfirmOpen(open);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Очистить чат?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Будет удалена история только текущего режима чата.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={isClearing}>Отмена</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 hover:bg-rose-700 focus-visible:ring-rose-500"
+              onClick={() => {
+                void clearCurrentChat();
+              }}
+              disabled={isClearing}
+            >
+              {isClearing ? 'Очистка...' : 'Очистить'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

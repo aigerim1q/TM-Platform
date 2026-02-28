@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import AIChatModal from '@/components/ai-chat-modal';
 import { X } from 'lucide-react';
@@ -9,10 +9,19 @@ export default function AIBubble() {
     const pathname = usePathname();
     const [open, setOpen] = useState(false);
 
-    // Hide the bubble on chat/chats pages
-    const isExcludedPage = pathname?.startsWith('/chat') || pathname?.startsWith('/chats');
+    const isVisiblePage =
+        pathname === '/' ||
+        pathname === '/dashboard' ||
+        pathname === '/calendar' ||
+        pathname === '/hierarchy';
 
-    if (isExcludedPage) return null;
+    useEffect(() => {
+        if (!isVisiblePage) {
+            setOpen(false);
+        }
+    }, [isVisiblePage]);
+
+    if (!isVisiblePage) return null;
 
     return (
         <>

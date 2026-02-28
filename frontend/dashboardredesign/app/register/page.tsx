@@ -64,8 +64,9 @@ export default function RegisterPage() {
       });
 
       router.push("/login");
-    } catch (err: any) {
-      setError(err?.message || "Ошибка регистрации");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Ошибка регистрации";
+      setError(message);
     } finally {
       setLoading(false);
     }

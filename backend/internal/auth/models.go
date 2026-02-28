@@ -25,3 +25,14 @@ type Department struct {
 	ParentID  *uuid.UUID `json:"parent_id,omitempty" db:"parent_id"`
 	CreatedAt time.Time  `json:"created_at" db:"created_at"`
 }
+
+type RefreshTokenRecord struct {
+	ID         uuid.UUID
+	UserID     uuid.UUID
+	JTI        string
+	TokenHash  string
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+	ReplacedBy *uuid.UUID
+	CreatedAt  time.Time
+}

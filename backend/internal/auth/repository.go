@@ -3,6 +3,8 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -14,6 +16,9 @@ type Repository struct {
 type userScanner interface {
 	Scan(dest ...any) error
 }
+
+var ErrRefreshTokenNotFound = errors.New("refresh token not found")
+var ErrRefreshTokenInvalid = errors.New("refresh token invalid")
 
 func NewRepository(db *sql.DB) *Repository {
 	return &Repository{db: db}
@@ -240,4 +245,107 @@ func scanUser(scanner userScanner, user *User) error {
 		&user.DepartmentName,
 		&user.CreatedAt,
 	)
+}
+
+func (r *Repository) StoreRefreshToken(ctx context.Context, userID uuid.UUID, jti, tokenHash string, expiresAt time.Time) error {
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO auth_refresh_tokens (user_id, jti, token_hash, expires_at)
+		 VALUES ($1, $2, $3, $4)`,
+		userID,
+		jti,
+		tokenHash,
+		expiresAt.UTC(),
+	)
+	return err
+}
+
+func (r *Repository) ConsumeAndRotateRefreshToken(
+	ctx context.Context,
+	tokenHash string,
+	expectedJTI string,
+	newJTI string,
+	newHash string,
+	newExpiresAt time.Time,
+) (uuid.UUID, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer tx.Rollback()
+
+	var current RefreshTokenRecord
+	var revokedAt sql.NullTime
+	var replacedBy sql.NullString
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT id, user_id, jti, token_hash, expires_at, revoked_at, replaced_by, created_at
+		 FROM auth_refresh_tokens
+		 WHERE token_hash = $1
+		 FOR UPDATE`,
+		tokenHash,
+	).Scan(
+		&current.ID,
+		&current.UserID,
+		&current.JTI,
+		&current.TokenHash,
+		&current.ExpiresAt,
+		&revokedAt,
+		&replacedBy,
+		&current.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return uuid.Nil, ErrRefreshTokenNotFound
+		}
+		return uuid.Nil, err
+	}
+	if revokedAt.Valid {
+		revokedCopy := revokedAt.Time
+		current.RevokedAt = &revokedCopy
+	}
+	if replacedBy.Valid {
+		parsed, parseErr := uuid.Parse(replacedBy.String)
+		if parseErr == nil {
+			current.ReplacedBy = &parsed
+		}
+	}
+
+	now := time.Now().UTC()
+	if current.JTI != expectedJTI || current.ExpiresAt.Before(now) || current.RevokedAt != nil || current.ReplacedBy != nil {
+		return uuid.Nil, ErrRefreshTokenInvalid
+	}
+
+	var nextID uuid.UUID
+	err = tx.QueryRowContext(
+		ctx,
+		`INSERT INTO auth_refresh_tokens (user_id, jti, token_hash, expires_at)
+		 VALUES ($1, $2, $3, $4)
+		 RETURNING id`,
+		current.UserID,
+		newJTI,
+		newHash,
+		newExpiresAt.UTC(),
+	).Scan(&nextID)
+	if err != nil {
+		return uuid.Nil, err
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`UPDATE auth_refresh_tokens
+		 SET revoked_at = $2, replaced_by = $3
+		 WHERE id = $1`,
+		current.ID,
+		now,
+		nextID,
+	); err != nil {
+		return uuid.Nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return uuid.Nil, err
+	}
+
+	return current.UserID, nil
 }

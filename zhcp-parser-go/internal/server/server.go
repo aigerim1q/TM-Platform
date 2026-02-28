@@ -1,13 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,22 +23,46 @@ import (
 	"github.com/google/uuid"
 )
 
+type ServerOptions struct {
+	AllowedOrigins    []string
+	Workers           int
+	QueueSize         int
+	JobTTL            time.Duration
+	ReadTimeout       time.Duration
+	ReadHeaderTimeout time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
+}
+
 type Server struct {
 	parser *parser.ZhcpParser
 	store  storage.Storage
 	port   string
 	jobs   map[string]*ParseJob
 	jobsMu sync.RWMutex
+
+	opts ServerOptions
+
+	queue     chan queuedParseJob
+	stopCh    chan struct{}
+	workersWG sync.WaitGroup
+	cleanupWG sync.WaitGroup
+}
+
+type queuedParseJob struct {
+	ID       string
+	FilePath string
 }
 
 type ParseJob struct {
-	ID        string                `json:"id"`
-	Status    string                `json:"status"` // queued, processing, completed, failed
-	Progress  int                   `json:"progress"`
-	Result    *parser.ParseResult   `json:"result,omitempty"`
-	Error     string                `json:"error,omitempty"`
-	CreatedAt time.Time             `json:"created_at"`
-	UpdatedAt time.Time             `json:"updated_at"`
+	ID        string              `json:"id"`
+	Status    string              `json:"status"` // queued, processing, completed, failed
+	Progress  int                 `json:"progress"`
+	Result    *parser.ParseResult `json:"result,omitempty"`
+	Error     string              `json:"error,omitempty"`
+	CreatedAt time.Time           `json:"created_at"`
+	UpdatedAt time.Time           `json:"updated_at"`
 }
 
 type UploadResponse struct {
@@ -50,16 +77,27 @@ type StatusResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
-func NewServer(parser *parser.ZhcpParser, store storage.Storage, port string) *Server {
+func NewServer(parser *parser.ZhcpParser, store storage.Storage, port string, opts ServerOptions) *Server {
+	resolved := resolveOptions(opts)
 	return &Server{
 		parser: parser,
 		store:  store,
 		port:   port,
 		jobs:   make(map[string]*ParseJob),
+		opts:   resolved,
+		queue:  make(chan queuedParseJob, resolved.QueueSize),
+		stopCh: make(chan struct{}),
 	}
 }
 
-func (s *Server) Start() error {
+func (s *Server) Start(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	s.startWorkers()
+	s.startCleanupLoop()
+
 	r := chi.NewRouter()
 
 	// Middleware
@@ -71,7 +109,7 @@ func (s *Server) Start() error {
 
 	// CORS configuration for frontend
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000", "http://localhost:3001", "http://localhost:3002"},
+		AllowedOrigins:   s.opts.AllowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
@@ -100,14 +138,57 @@ func (s *Server) Start() error {
 		r.Put("/tasks/{id}/status", s.handleUpdateTaskStatus)
 	})
 
-	// Health check
+	// Health/readiness checks
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		if s.parser == nil {
+			writeError(w, http.StatusServiceUnavailable, "parser not initialized")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":     "ready",
+			"workers":    s.opts.Workers,
+			"queue_size": cap(s.queue),
+		})
+	})
 
 	addr := ":" + s.port
-	log.Printf("🚀 Server listening on %s\n", addr)
-	return http.ListenAndServe(addr, r)
+	httpServer := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadTimeout:       s.opts.ReadTimeout,
+		ReadHeaderTimeout: s.opts.ReadHeaderTimeout,
+		WriteTimeout:      s.opts.WriteTimeout,
+		IdleTimeout:       s.opts.IdleTimeout,
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("server listening on %s", addr)
+		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- err
+		}
+	}()
+
+	select {
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.opts.ShutdownTimeout)
+		defer cancel()
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		close(s.stopCh)
+		s.workersWG.Wait()
+		s.cleanupWG.Wait()
+		return nil
+	case err := <-errCh:
+		close(s.stopCh)
+		s.workersWG.Wait()
+		s.cleanupWG.Wait()
+		return err
+	}
 }
 
 // ============================================================================
@@ -129,7 +210,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Validate file type
-	ext := filepath.Ext(header.Filename)
+	ext := strings.ToLower(filepath.Ext(header.Filename))
 	if ext != ".pdf" && ext != ".docx" {
 		writeError(w, http.StatusBadRequest, "Only PDF and DOCX files are supported")
 		return
@@ -138,7 +219,7 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	// Create temp file
 	tempDir := os.TempDir()
 	tempFile := filepath.Join(tempDir, fmt.Sprintf("%s%s", uuid.New().String(), ext))
-	
+
 	out, err := os.Create(tempFile)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "Failed to create temp file")
@@ -157,21 +238,27 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		ID:        jobID,
 		Status:    "queued",
 		Progress:  0,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
 	}
 
 	s.jobsMu.Lock()
 	s.jobs[jobID] = job
 	s.jobsMu.Unlock()
 
-	// Process asynchronously
-	go s.processFile(jobID, tempFile)
-
-	writeJSON(w, http.StatusAccepted, UploadResponse{
-		JobID:  jobID,
-		Status: "queued",
-	})
+	select {
+	case s.queue <- queuedParseJob{ID: jobID, FilePath: tempFile}:
+		writeJSON(w, http.StatusAccepted, UploadResponse{
+			JobID:  jobID,
+			Status: "queued",
+		})
+	default:
+		s.jobsMu.Lock()
+		delete(s.jobs, jobID)
+		s.jobsMu.Unlock()
+		_ = os.Remove(tempFile)
+		writeError(w, http.StatusServiceUnavailable, "Parser queue is full, try again later")
+	}
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -214,36 +301,120 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job.Result)
 }
 
+func (s *Server) startWorkers() {
+	for i := 0; i < s.opts.Workers; i++ {
+		s.workersWG.Add(1)
+		go func(workerID int) {
+			defer s.workersWG.Done()
+			for {
+				select {
+				case <-s.stopCh:
+					return
+				case item := <-s.queue:
+					s.processFile(item.ID, item.FilePath)
+				}
+			}
+		}(i)
+	}
+}
+
 func (s *Server) processFile(jobID, filePath string) {
-	defer os.Remove(filePath) // Clean up temp file
+	defer os.Remove(filePath)
 
 	s.jobsMu.Lock()
-	job := s.jobs[jobID]
+	job, exists := s.jobs[jobID]
+	if !exists {
+		s.jobsMu.Unlock()
+		return
+	}
 	job.Status = "processing"
 	job.Progress = 10
-	job.UpdatedAt = time.Now()
+	job.UpdatedAt = time.Now().UTC()
 	s.jobsMu.Unlock()
 
-	// Parse document
 	result, err := s.parser.ParseDocument(filePath, true, true)
-	
+
 	s.jobsMu.Lock()
 	defer s.jobsMu.Unlock()
 
+	job, exists = s.jobs[jobID]
+	if !exists {
+		return
+	}
 	if err != nil {
 		job.Status = "failed"
 		job.Error = err.Error()
 		job.Progress = 0
-		job.UpdatedAt = time.Now()
+		job.UpdatedAt = time.Now().UTC()
 		return
 	}
 
 	job.Status = "completed"
 	job.Progress = 100
 	job.Result = result
-	job.UpdatedAt = time.Now()
+	job.UpdatedAt = time.Now().UTC()
+}
 
-	// Persisting parsed structure to storage is not wired yet; skip for now.
+func (s *Server) startCleanupLoop() {
+	s.cleanupWG.Add(1)
+	go func() {
+		defer s.cleanupWG.Done()
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-s.stopCh:
+				return
+			case <-ticker.C:
+				now := time.Now().UTC()
+				s.jobsMu.Lock()
+				for id, job := range s.jobs {
+					if job == nil {
+						delete(s.jobs, id)
+						continue
+					}
+					if job.Status == "completed" || job.Status == "failed" {
+						if now.Sub(job.UpdatedAt) > s.opts.JobTTL {
+							delete(s.jobs, id)
+						}
+					}
+				}
+				s.jobsMu.Unlock()
+			}
+		}
+	}()
+}
+
+func resolveOptions(opts ServerOptions) ServerOptions {
+	if len(opts.AllowedOrigins) == 0 {
+		opts.AllowedOrigins = []string{"http://localhost:3000", "http://localhost:3001", "http://localhost:3002"}
+	}
+	if opts.Workers <= 0 {
+		opts.Workers = 4
+	}
+	if opts.QueueSize <= 0 {
+		opts.QueueSize = 64
+	}
+	if opts.JobTTL <= 0 {
+		opts.JobTTL = 30 * time.Minute
+	}
+	if opts.ReadTimeout <= 0 {
+		opts.ReadTimeout = 20 * time.Second
+	}
+	if opts.ReadHeaderTimeout <= 0 {
+		opts.ReadHeaderTimeout = 10 * time.Second
+	}
+	if opts.WriteTimeout <= 0 {
+		opts.WriteTimeout = 30 * time.Second
+	}
+	if opts.IdleTimeout <= 0 {
+		opts.IdleTimeout = 60 * time.Second
+	}
+	if opts.ShutdownTimeout <= 0 {
+		opts.ShutdownTimeout = 10 * time.Second
+	}
+	return opts
 }
 
 // ============================================================================
@@ -262,7 +433,7 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"items": projects,
 		"total": len(projects),
 	})
@@ -370,7 +541,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"items": tasks,
 		"total": len(tasks),
 	})
@@ -456,7 +627,7 @@ func (s *Server) handleUpdateTaskStatus(w http.ResponseWriter, r *http.Request) 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {

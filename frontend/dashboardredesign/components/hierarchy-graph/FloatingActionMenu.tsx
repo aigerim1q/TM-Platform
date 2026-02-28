@@ -303,7 +303,6 @@ export function FloatingActionMenu({ nodeId, nodeType, initialMode = 'default', 
                         >
                           <span className="grid h-6 w-6 shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 dark:bg-white/10">
                             {avatar ? (
-                              // eslint-disable-next-line @next/next/no-img-element
                               <img src={avatar} alt={user.full_name || user.email} className="h-full w-full object-cover" />
                             ) : (
                               <UserPlus size={12} />
@@ -346,7 +345,6 @@ export function FloatingActionMenu({ nodeId, nodeType, initialMode = 'default', 
                         >
                           <span className="grid h-6 w-6 shrink-0 place-items-center overflow-hidden rounded-full bg-slate-200 dark:bg-white/10">
                             {avatar ? (
-                              // eslint-disable-next-line @next/next/no-img-element
                               <img src={avatar} alt={user.full_name || user.email} className="h-full w-full object-cover" />
                             ) : (
                               <UserPlus size={12} />

@@ -80,9 +80,9 @@ export default function LoginPage() {
       });
 
       router.push("/dashboard");
-    } catch (err: any) {
-      // если в login() ты кидаешь Error(message), он сюда попадёт
-      setError(err?.message || "Ошибка входа");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Ошибка входа";
+      setError(message);
     } finally {
       setLoading(false);
     }

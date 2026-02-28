@@ -1,28 +1,11 @@
 'use client';
 
-import { Suspense, useEffect, useState } from 'react';
+import { Suspense } from 'react';
 import Header from '@/components/header';
 import Sidebar from '@/components/sidebar';
 import AIChatContent from '@/components/ai-chat-content';
-import LoadingSplash from '@/components/loading-splash';
 
 export default function Lifecycle() {
-  const [isHydrated, setIsHydrated] = useState(false);
-
-  useEffect(() => {
-    setIsHydrated(true);
-  }, []);
-
-  if (!isHydrated) {
-    return (
-      <LoadingSplash
-        fullScreen
-        title="Загружаем ЖЦП"
-        subtitle="Подготавливаем рабочий контекст..."
-      />
-    );
-  }
-
   return (
     <div className="flex h-screen bg-white dark:bg-background">
       <div className="hidden md:block h-full">
